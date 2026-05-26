@@ -1,0 +1,63 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from app.db import connect, init_db
+
+
+class DatabaseMigrationTests(unittest.TestCase):
+    def test_init_db_adds_hypothesis_columns_to_existing_recommendations_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            conn.executescript(
+                """
+                CREATE TABLE recommendations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    book_id INTEGER NOT NULL,
+                    recommendation_date TEXT NOT NULL,
+                    slot_type TEXT NOT NULL,
+                    theme TEXT NOT NULL,
+                    recommendation_reason TEXT NOT NULL,
+                    profile_mapping TEXT NOT NULL,
+                    expected_benefit TEXT NOT NULL,
+                    risk TEXT NOT NULL,
+                    reading_suggestion TEXT NOT NULL,
+                    message_id TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+
+            init_db(conn)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(recommendations)")}
+            conn.close()
+
+        self.assertIn("system_hypothesis", columns)
+        self.assertIn("profile_dimensions", columns)
+
+    def test_init_db_adds_reason_code_to_existing_feedback_events_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            conn.executescript(
+                """
+                CREATE TABLE feedback_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recommendation_id INTEGER NOT NULL,
+                    feedback_type TEXT NOT NULL,
+                    free_text TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    processed_at TEXT
+                );
+                """
+            )
+
+            init_db(conn)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(feedback_events)")}
+            conn.close()
+
+        self.assertIn("reason_code", columns)
+
+
+if __name__ == "__main__":
+    unittest.main()

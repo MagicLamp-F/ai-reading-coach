@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+
+@dataclass(frozen=True)
+class Settings:
+    channel: str
+    lark_webhook_url: str
+    lark_webhook_secret: str
+    public_base_url: str
+    feedback_secret: str
+    telegram_bot_token: str
+    telegram_chat_id: str
+    model_provider: str
+    openai_api_key: str
+    openai_model: str
+    openai_base_url: str
+    tavily_api_key: str
+    database_path: Path
+    daily_push_time: str
+    timezone: ZoneInfo
+    http_timeout_seconds: float
+    max_daily_search_calls: int
+    max_daily_model_calls: int
+    log_level: str
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        return cls(
+            channel=os.getenv("CHANNEL", "lark").strip().lower(),
+            lark_webhook_url=os.getenv("LARK_WEBHOOK_URL", ""),
+            lark_webhook_secret=os.getenv("LARK_WEBHOOK_SECRET", ""),
+            public_base_url=os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/"),
+            feedback_secret=os.getenv("FEEDBACK_SECRET", ""),
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            model_provider=os.getenv("MODEL_PROVIDER", "openai"),
+            openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+            openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
+            openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+            tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
+            database_path=_database_path(os.getenv("DATABASE_URL", "sqlite:///data/reading_coach.db")),
+            daily_push_time=os.getenv("DAILY_PUSH_TIME", "08:00"),
+            timezone=ZoneInfo(os.getenv("TIMEZONE", "Asia/Shanghai")),
+            http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
+            max_daily_search_calls=int(os.getenv("MAX_DAILY_SEARCH_CALLS", "6")),
+            max_daily_model_calls=int(os.getenv("MAX_DAILY_MODEL_CALLS", "4")),
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+        )
+
+
+def _database_path(database_url: str) -> Path:
+    prefix = "sqlite:///"
+    if not database_url.startswith(prefix):
+        raise ValueError("Only sqlite:/// DATABASE_URL is supported in the MVP")
+    raw_path = database_url[len(prefix) :]
+    return Path(raw_path)

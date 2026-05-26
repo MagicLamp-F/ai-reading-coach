@@ -1,0 +1,19 @@
+services:
+  reading-coach:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  feedback-server:
+    build: .
+    env_file: .env
+    command: ["python", "-m", "app.cli", "run-server", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run AI Reading Coach weekly report on Sunday at 20:00
+
+[Timer]
+OnCalendar=Sun *-*-* 20:00:00
+Persistent=true
+Unit=ai-reading-coach-weekly.service
+
+[Install]
+WantedBy=timers.target
