@@ -4,11 +4,13 @@ import json
 import logging
 from datetime import datetime
 from html import escape
+from pathlib import Path
 from typing import Any
 
 from app.feedback import FEEDBACK_LABELS, FEEDBACK_REASON_LABELS, FEEDBACK_TYPES, build_feedback_url
 from app.lark import LarkFeedbackLink, LarkRobotClient
 from app.llm import OpenAIChatClient
+from app.memory import DEFAULT_LONG_TERM_MEMORY_MAX_CHARS, load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
 from app.repository import RecommendationDraft, Repository
 from app.search import SearchResult, TavilySearch
@@ -84,6 +86,8 @@ class ReadingCoachWorkflow:
         feedback_secret: str,
         max_search_calls: int,
         max_model_calls: int,
+        memory_dir: Path = Path("memory"),
+        max_memory_chars: int = DEFAULT_LONG_TERM_MEMORY_MAX_CHARS,
     ):
         self.repo = repo
         self.search = search
@@ -95,13 +99,18 @@ class ReadingCoachWorkflow:
         self.feedback_secret = feedback_secret
         self.max_search_calls = max_search_calls
         self.max_model_calls = max_model_calls
+        self.memory_dir = memory_dir
+        self.max_memory_chars = max_memory_chars
 
     def run_daily_recommendations(self) -> int:
         run_id = self.repo.create_run("daily_recommendation", {"channel": self.channel})
         api_calls = 0
         try:
             processed_feedback = process_feedback(self.repo)
-            profile_context = build_profile_context(self.repo)
+            profile_context = build_daily_profile_context(
+                structured_profile_context=build_profile_context(self.repo),
+                long_term_memory_context=load_long_term_memory_context(self.memory_dir, self.max_memory_chars),
+            )
             themes = self._generate_themes(profile_context)
             if self.llm.api_key:
                 api_calls += 1
@@ -283,20 +292,21 @@ class ReadingCoachWorkflow:
             logger.warning(warning)
             self.repo.record_run_warning(run_id, warning)
             return
-        if message_id:
-            return
-        warning = "profile test summary lark send failed"
-        logger.warning(warning)
-        self.repo.record_run_warning(run_id, warning)
+        if message_id is None:
+            warning = "profile test summary lark send failed"
+            logger.warning(warning)
+            self.repo.record_run_warning(run_id, warning)
 
     def _generate_themes(self, profile_context: str) -> list[str]:
         try:
             response = self.llm.complete_json(
                 "你是读书推荐系统的画像决策层。只输出 JSON。",
                 (
-                    "根据用户画像生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
+                    "根据用户画像上下文生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
+                    "用户画像上下文明确分为 SQLite structured profile 和 Hermes long-term memory；"
+                    "二者都可使用，但不要假设未出现在上下文中的 draft reflection 已生效。"
                     '输出格式：{"themes":["主题1","主题2","主题3"]}\n\n'
-                    f"用户画像：\n{profile_context}"
+                    f"用户画像上下文：\n{profile_context}"
                 ),
             )
         except Exception:
@@ -321,13 +331,15 @@ class ReadingCoachWorkflow:
             response = self.llm.complete_json(
                 "你是读书私教系统的执行层。只输出 JSON，不要输出 Markdown。",
                 (
-                    "基于用户画像、今日主题和搜索结果，推荐 3 本书。"
+                    "基于用户画像上下文、今日主题和搜索结果，推荐 3 本书。"
+                    "用户画像上下文明确分为 SQLite structured profile 和 Hermes long-term memory；"
+                    "二者都可使用，但不要假设未出现在上下文中的 draft reflection 已生效。"
                     "每本书必须包含 title, author, source_url, slot_type, theme, system_hypothesis, "
                     "profile_dimensions, recommendation_reason, profile_mapping, expected_benefit, risk, reading_suggestion。"
                     "system_hypothesis 说明这本书正在测试哪个用户假设；profile_dimensions 是画像维度字符串数组。"
                     "slot_type 只能是 profile_fit 或 exploration。"
                     '输出格式：{"books":[...]}。\n\n'
-                    f"用户画像：\n{profile_context}\n\n"
+                    f"用户画像上下文：\n{profile_context}\n\n"
                     f"今日主题：{json.dumps(themes, ensure_ascii=False)}\n\n"
                     f"搜索结果：\n{search_context}"
                 ),
@@ -371,6 +383,15 @@ def _profile_dimensions(raw: Any) -> list[str]:
         if isinstance(parsed, list):
             return [str(item)[:80] for item in parsed if str(item).strip()][:8]
     return ["long_term_interest", "reading_preference"]
+
+
+def build_daily_profile_context(structured_profile_context: str, long_term_memory_context: str) -> str:
+    return (
+        "SQLite structured profile:\n"
+        f"{structured_profile_context.strip() or '暂无画像。'}\n\n"
+        "Hermes long-term memory:\n"
+        f"{long_term_memory_context.strip() or '暂无 Hermes long-term memory。'}"
+    )
 
 
 def _dimension_type_label(dimension_type: str) -> str:
