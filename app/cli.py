@@ -13,6 +13,13 @@ from app.logging_setup import configure_logging
 from app.metrics import MetricsServer
 from app.poller import TelegramPoller
 from app.profile import seed_user_manual
+from app.reflection import (
+    HermesReflectionService,
+    ReflectionError,
+    ensure_memory_layout,
+    format_reflection_list,
+    format_reflection_show,
+)
 from app.scheduler import DailyScheduler
 from app.server import run_feedback_server
 
@@ -31,6 +38,25 @@ def main() -> None:
 
     subparsers.add_parser("run-daily", help="Run one daily recommendation workflow")
     subparsers.add_parser("run-weekly-report", help="Send one weekly profile report")
+
+    reflection_generate = subparsers.add_parser("generate-reflection", help="Generate a Hermes reflection draft")
+    reflection_generate.add_argument("--days", type=int, default=7, help="Number of recent days to reflect on")
+    reflection_generate.add_argument(
+        "--no-lark",
+        action="store_true",
+        help="Do not send the pending-review Lark summary after generation",
+    )
+
+    reflection_approve = subparsers.add_parser("approve-reflection", help="Approve a Hermes reflection draft")
+    reflection_approve.add_argument("--id", type=int, required=True, help="Reflection id")
+
+    reflection_apply = subparsers.add_parser("apply-reflection", help="Apply an approved Hermes reflection")
+    reflection_apply.add_argument("--id", type=int, required=True, help="Reflection id")
+
+    reflection_show = subparsers.add_parser("show-reflection", help="Show one Hermes reflection")
+    reflection_show.add_argument("--id", type=int, required=True, help="Reflection id")
+
+    subparsers.add_parser("list-reflections", help="List Hermes reflections")
 
     server = subparsers.add_parser("run-server", help="Run the feedback HTTP server")
     server.add_argument("--host", default="127.0.0.1", help="Host to bind")
@@ -71,6 +97,40 @@ def main() -> None:
         print("Weekly report sent")
         return
 
+    if args.command == "generate-reflection":
+        service = HermesReflectionService(
+            repo=context.repo,
+            llm=context.workflow.llm,
+            weekly_report_builder=context.workflow.build_weekly_report,
+            lark=context.lark,
+        )
+        reflection_id = service.generate_reflection(days=args.days, notify_lark=not args.no_lark)
+        print(f"Hermes reflection draft generated: id={reflection_id}")
+        print("Status: draft; pending human approval before apply.")
+        return
+
+    if args.command == "approve-reflection":
+        _reflection_service(context).approve_reflection(args.id)
+        print(f"Approved reflection: id={args.id}")
+        return
+
+    if args.command == "apply-reflection":
+        _reflection_service(context).apply_reflection(args.id)
+        print(f"Applied reflection: id={args.id}")
+        return
+
+    if args.command == "show-reflection":
+        row = context.repo.get_reflection(args.id)
+        if row is None:
+            raise ReflectionError(f"Reflection not found: id={args.id}")
+        print(format_reflection_show(row))
+        return
+
+    if args.command == "list-reflections":
+        ensure_memory_layout()
+        print(format_reflection_list(context.repo.list_reflections()))
+        return
+
     if args.command == "run-server":
         run_feedback_server(settings, host=args.host, port=args.port)
         return
@@ -94,6 +154,15 @@ def main() -> None:
         DailyScheduler(settings, context.workflow).run_forever()
 
 
+def _reflection_service(context) -> HermesReflectionService:
+    return HermesReflectionService(
+        repo=context.repo,
+        llm=context.workflow.llm,
+        weekly_report_builder=context.workflow.build_weekly_report,
+        lark=context.lark,
+    )
+
+
 def _load_env_file(path: Path) -> None:
     if not path.exists():
         return
@@ -107,4 +176,3 @@ def _load_env_file(path: Path) -> None:
 
 if __name__ == "__main__":
     main()
-

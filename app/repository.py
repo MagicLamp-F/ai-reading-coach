@@ -234,6 +234,76 @@ class Repository:
             )
         )
 
+    def reflection_recommendations(self, days: int = 7, limit: int = 80) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT
+                    r.id,
+                    r.recommendation_date,
+                    r.slot_type,
+                    r.theme,
+                    r.recommendation_reason,
+                    r.profile_mapping,
+                    r.system_hypothesis,
+                    r.profile_dimensions,
+                    r.expected_benefit,
+                    r.risk,
+                    r.reading_suggestion,
+                    r.created_at,
+                    b.title,
+                    b.author
+                FROM recommendations r
+                JOIN books b ON b.id = r.book_id
+                WHERE r.created_at >= datetime('now', ?)
+                ORDER BY r.created_at DESC, r.id DESC
+                LIMIT ?
+                """,
+                (f"-{days} days", limit),
+            )
+        )
+
+    def reflection_feedback_events(self, days: int = 7, limit: int = 120) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT
+                    f.id,
+                    f.recommendation_id,
+                    f.feedback_type,
+                    f.reason_code,
+                    f.free_text,
+                    f.created_at,
+                    r.theme,
+                    r.slot_type,
+                    r.system_hypothesis,
+                    r.profile_dimensions,
+                    b.title,
+                    b.author
+                FROM feedback_events f
+                JOIN recommendations r ON r.id = f.recommendation_id
+                JOIN books b ON b.id = r.book_id
+                WHERE f.created_at >= datetime('now', ?)
+                ORDER BY f.created_at DESC, f.id DESC
+                LIMIT ?
+                """,
+                (f"-{days} days", limit),
+            )
+        )
+
+    def reflection_profile_items(self, limit: int = 80) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT *
+                FROM profile_items
+                ORDER BY weight DESC, confidence DESC, evidence_count DESC, updated_at DESC, category ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+
     def weekly_feedback_summary(self, days: int = 7) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(
@@ -444,6 +514,89 @@ class Repository:
                 (f"-{days} days",),
             )
         )
+
+    def add_reflection(
+        self,
+        period_start: str,
+        period_end: str,
+        summary: str,
+        accurate_observations: Any,
+        misunderstandings: Any,
+        profile_updates: Any,
+        next_questions: Any,
+        user_md_patch: str,
+        memory_md_patch: str,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO reflections(
+                period_start,
+                period_end,
+                summary,
+                accurate_observations_json,
+                misunderstandings_json,
+                profile_updates_json,
+                next_questions_json,
+                user_md_patch,
+                memory_md_patch,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')
+            """,
+            (
+                period_start,
+                period_end,
+                summary,
+                json.dumps(accurate_observations, ensure_ascii=False),
+                json.dumps(misunderstandings, ensure_ascii=False),
+                json.dumps(profile_updates, ensure_ascii=False),
+                json.dumps(next_questions, ensure_ascii=False),
+                user_md_patch,
+                memory_md_patch,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def get_reflection(self, reflection_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM reflections WHERE id = ?",
+            (reflection_id,),
+        ).fetchone()
+
+    def list_reflections(self, limit: int = 20) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT id, period_start, period_end, summary, status, created_at, approved_at, applied_at
+                FROM reflections
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+
+    def approve_reflection(self, reflection_id: int) -> bool:
+        cur = self.conn.execute(
+            """
+            UPDATE reflections
+            SET status = 'approved', approved_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'draft'
+            """,
+            (reflection_id,),
+        )
+        return cur.rowcount > 0
+
+    def mark_reflection_applied(self, reflection_id: int) -> bool:
+        cur = self.conn.execute(
+            """
+            UPDATE reflections
+            SET status = 'applied', applied_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'approved'
+            """,
+            (reflection_id,),
+        )
+        return cur.rowcount > 0
 
 
 def _clamp(value: float) -> float:

@@ -96,10 +96,28 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(run_id) REFERENCES run_logs(id) ON DELETE SET NULL
         );
 
+        CREATE TABLE IF NOT EXISTS reflections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            accurate_observations_json TEXT NOT NULL DEFAULT '[]',
+            misunderstandings_json TEXT NOT NULL DEFAULT '[]',
+            profile_updates_json TEXT NOT NULL DEFAULT '{}',
+            next_questions_json TEXT NOT NULL DEFAULT '[]',
+            user_md_patch TEXT NOT NULL DEFAULT '',
+            memory_md_patch TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'approved', 'rejected', 'applied')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            approved_at TEXT,
+            applied_at TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_profile_category_weight ON profile_items(category, weight DESC, confidence DESC);
         CREATE INDEX IF NOT EXISTS idx_feedback_unprocessed ON feedback_events(processed_at);
         CREATE INDEX IF NOT EXISTS idx_recommendations_date ON recommendations(recommendation_date);
         CREATE INDEX IF NOT EXISTS idx_cost_logs_run ON cost_logs(run_id);
+        CREATE INDEX IF NOT EXISTS idx_reflections_status_created ON reflections(status, created_at DESC);
         """
     )
     _ensure_column(conn, "recommendations", "system_hypothesis", "TEXT NOT NULL DEFAULT ''")

@@ -58,6 +58,18 @@ class DatabaseMigrationTests(unittest.TestCase):
 
         self.assertIn("reason_code", columns)
 
+    def test_init_db_creates_reflections_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            init_db(conn)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(reflections)")}
+            conn.close()
+
+        self.assertIn("summary", columns)
+        self.assertIn("user_md_patch", columns)
+        self.assertIn("memory_md_patch", columns)
+        self.assertIn("status", columns)
+
 
 if __name__ == "__main__":
     unittest.main()

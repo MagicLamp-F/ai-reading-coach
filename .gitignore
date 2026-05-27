@@ -8,3 +8,5 @@ data/*.db-*
 data/*.pid
 backups/*.db
 logs/*.log
+memory/reflections/reflection_*.md
+memory/patches/*.md
