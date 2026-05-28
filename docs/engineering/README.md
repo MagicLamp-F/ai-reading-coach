@@ -25,6 +25,7 @@
 9. [服务器 Codex 执行 Prompt：飞书初版通道](./08_server_codex_lark_mvp_prompt.md)：在服务器 Codex 中粘贴执行的最终 Prompt。
 10. [7 天试运行 Runbook](./09_trial_run_runbook.md)：systemd、定时任务、备份恢复、日志和每日观察清单。
 11. [当前进展总结](./10_current_progress_summary.md)：截至 2026-05-26 的已完成能力、待验证事项和下一步工作。
+12. [hermes-agent 接入设计](./11_hermes_agent_integration_design.md)：Reflection Agent Adapter、hermes-agent CLI 接入、fallback、人审和回滚边界。
 
 探索文档：
 

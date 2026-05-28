@@ -18,7 +18,9 @@ Python Orchestrator
   |
   +--> 国内模型 / 搜索 API
   |
-  +--> Hermes Memory / Reflection
+  +--> Reflection Agent Adapter
+  |       +--> hermes-agent（可选）
+  |       +--> custom reflection fallback
   |
   +--> OpenClaw Gateway / Skill Layer（后续）
   |
@@ -80,18 +82,21 @@ SQLite 是 source of truth，保存不可丢失的原始事实：
 - 画像摘要可以重算。
 - 每条画像必须能追溯证据。
 
-### Hermes：长期记忆和反思层
+### Hermes / Reflection Agent：长期记忆和反思层
 
-Hermes 负责把事实解释成语义记忆：
+Hermes 负责把事实解释成语义记忆。当前实现已经把这层抽象成可插拔 `ReflectionAgentAdapter`：
 
-- 读取 SQLite 摘要。
-- 读取和维护 `USER.md` / `MEMORY.md`。
+- `hermes-agent` 可以作为外部 agent 实现接入。
+- 当前自研 custom reflection 继续作为 fallback。
+- Python Orchestrator 统一构造 SQLite 摘要和 weekly report 上下文。
+- agent 只输出 reflection JSON 草稿，不直接写数据库、不直接写 memory 文件、不发送消息。
+- `USER.md` / `MEMORY.md` 仍由 Python 后端在人工审批后追加写入。
 - 总结长期兴趣和短期关注。
 - 识别知识缺口、行动阶段、反感模式。
 - 每周生成用户画像复盘。
 - 提出 Skill 或推荐策略的改进建议。
 
-Hermes 不直接替代 SQLite。Hermes 生成的是可解释的语义视图，SQLite 保留事实证据。
+Hermes 不直接替代 SQLite。SQLite 保存事实，Reflection Agent 只生成可解释草稿；草稿必须经过人工 `approve-reflection` 和 `apply-reflection` 后，才会进入 `memory/USER.md` 与 `memory/MEMORY.md`。`run-daily` 只读取已应用 memory，绝不读取 draft reflection。
 
 ### Python Orchestrator：可靠编排层
 
@@ -145,6 +150,7 @@ Skill 的更新应先由 Hermes 提出建议，再由用户确认后生效。
 - 基于 `feedback_type + reason_code` 的画像回写规则。
 - 7 天复盘，包含反馈分布、原因分布、画像置信度分层、可能误解、自由文本摘要和下周建议。
 - 日志、基础 metrics、systemd 试运行单元和备份脚本。
+- Hermes reflection adapter：支持 `custom` 默认实现和 `hermes-agent` CLI 适配器；外部 agent 失败时可回退到 custom reflection。
 - Telegram 推送和按钮反馈框架仍保留为兼容通道。
 
 当前暂不继续完善 Telegram。下一步是把飞书初版放到真实服务器试运行，并用真实反馈验证原因体系和画像更新规则：
@@ -163,7 +169,7 @@ docs/engineering/09_trial_run_runbook.md
 
 ```text
 飞书自定义机器人 -> 飞书应用机器人
-profile.py 的规则总结 -> Hermes reflection
+profile.py 的规则总结 -> Reflection Agent 草稿 -> 人审应用
 硬编码 prompt -> Skill 文件
 SQLite 摘要 -> Hermes memory provider / context input
 多渠道接入 -> OpenClaw Gateway

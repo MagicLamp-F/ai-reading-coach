@@ -103,6 +103,7 @@ def main() -> None:
             llm=context.workflow.llm,
             weekly_report_builder=context.workflow.build_weekly_report,
             lark=context.lark,
+            adapter=context.reflection_adapter,
         )
         reflection_id = service.generate_reflection(days=args.days, notify_lark=not args.no_lark)
         print(f"Hermes reflection draft generated: id={reflection_id}")
@@ -160,6 +161,7 @@ def _reflection_service(context) -> HermesReflectionService:
         llm=context.workflow.llm,
         weekly_report_builder=context.workflow.build_weekly_report,
         lark=context.lark,
+        adapter=context.reflection_adapter,
     )
 
 

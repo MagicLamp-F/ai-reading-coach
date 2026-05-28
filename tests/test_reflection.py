@@ -10,6 +10,7 @@ from app.reflection import (
     build_reflection_context,
     build_reflection_prompt,
 )
+from app.reflection_adapter import ReflectionAdapterError, ReflectionAgentResult
 from app.repository import RecommendationDraft, Repository
 
 
@@ -45,6 +46,43 @@ class CapturingLark:
     def send_text(self, text):
         self.texts.append(text)
         return self.message_id
+
+
+class FakeAdapter:
+    name = "fake-agent"
+
+    def __init__(self, response=None):
+        self.response = response or reflection_response()
+        self.calls = []
+
+    def generate_reflection(self, system_prompt, user_prompt, context):
+        self.calls.append((system_prompt, user_prompt, context))
+        return ReflectionAgentResult(
+            response=self.response,
+            provider=self.name,
+            api_calls=0,
+        )
+
+
+class WarningAdapter(FakeAdapter):
+    name = "fake-agent+fallback:custom"
+
+    def generate_reflection(self, system_prompt, user_prompt, context):
+        self.calls.append((system_prompt, user_prompt, context))
+        return ReflectionAgentResult(
+            response=self.response,
+            provider="custom",
+            api_calls=1,
+            fallback_used=True,
+            warnings=("fake-agent failed; fell back to custom: timeout",),
+        )
+
+
+class FailingAdapter:
+    name = "failing-agent"
+
+    def generate_reflection(self, system_prompt, user_prompt, context):
+        raise ReflectionAdapterError("agent unavailable")
 
 
 class ReflectionTests(unittest.TestCase):
@@ -105,6 +143,71 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(len(lark.texts), 1)
         self.assertIn("待人工确认", lark.texts[0])
         self.assertIn(f"reflection_id: {reflection_id}", lark.texts[0])
+
+    def test_generate_reflection_can_use_agent_adapter_without_calling_llm(self):
+        self._add_recommendation(theme="软件工程实践")
+        llm = FakeLLM()
+        adapter = FakeAdapter()
+        service = HermesReflectionService(
+            self.repo,
+            llm,
+            weekly_report_builder=lambda: "weekly report",
+            memory_dir=self.memory_dir,
+            adapter=adapter,
+        )
+
+        reflection_id = service.generate_reflection(days=7, notify_lark=False)
+
+        row = self.repo.get_reflection(reflection_id)
+        self.assertEqual(row["status"], "draft")
+        self.assertEqual(llm.calls, [])
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertIn("recommendations", adapter.calls[0][2])
+        run = self.conn.execute(
+            "SELECT * FROM run_logs WHERE run_type = 'hermes_reflection' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(run["api_calls"], 0)
+        self.assertIn("fake-agent", run["metadata_json"])
+
+    def test_agent_fallback_warning_is_recorded_without_apply(self):
+        service = HermesReflectionService(
+            self.repo,
+            FakeLLM(),
+            weekly_report_builder=lambda: "weekly report",
+            memory_dir=self.memory_dir,
+            adapter=WarningAdapter(),
+        )
+
+        reflection_id = service.generate_reflection(days=7, notify_lark=False)
+
+        row = self.repo.get_reflection(reflection_id)
+        self.assertEqual(row["status"], "draft")
+        self.assertFalse((self.memory_dir / "USER.md").read_text(encoding="utf-8").strip().endswith("用户偏好工程实践与可落地方案。"))
+        run = self.conn.execute(
+            "SELECT * FROM run_logs WHERE run_type = 'hermes_reflection' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(run["status"], "success")
+        self.assertIn("fell back to custom", run["warning_message"])
+
+    def test_agent_failure_records_failed_run_without_reflection(self):
+        service = HermesReflectionService(
+            self.repo,
+            FakeLLM(),
+            weekly_report_builder=lambda: "weekly report",
+            memory_dir=self.memory_dir,
+            adapter=FailingAdapter(),
+        )
+
+        with self.assertRaises(ReflectionAdapterError):
+            service.generate_reflection(days=7, notify_lark=False)
+
+        run = self.conn.execute(
+            "SELECT * FROM run_logs WHERE run_type = 'hermes_reflection' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        reflection_count = self.conn.execute("SELECT COUNT(*) AS count FROM reflections").fetchone()["count"]
+        self.assertEqual(run["status"], "failed")
+        self.assertIn("agent unavailable", run["error_message"])
+        self.assertEqual(reflection_count, 0)
 
     def test_generate_reflection_treats_empty_lark_message_id_as_success(self):
         lark = CapturingLark(message_id="")

@@ -14,6 +14,7 @@
 - OpenAI 兼容 Chat Completions 生成主题和推荐；无 Key 或调用失败时自动使用保守默认主题和降级推荐。
 - 每天按 `.env` 的 `DAILY_PUSH_TIME` 推送。
 - 每周日 20:00 推送 7 天画像复盘。
+- Hermes reflection 支持可插拔 adapter：默认使用当前 custom reflection；可切换到外部 `hermes-agent`，失败时回退到 custom reflection，草稿仍需人工审批后才会写入长期记忆。
 - `/metrics` 暴露基础 Prometheus 指标，默认端口 `9108`。
 - 提供 systemd service/timer 和 SQLite 备份脚本，支持 7 天服务器试运行。
 
@@ -41,6 +42,8 @@ PUBLIC_BASE_URL=https://your-domain.example
 FEEDBACK_SECRET=change-me
 OPENAI_API_KEY=sk-xxx
 TAVILY_API_KEY=tvly-xxx
+HERMES_REFLECTION_PROVIDER=custom
+HERMES_AGENT_COMMAND=hermes-agent reflect --json
 ```
 
 启动反馈 HTTP 服务：
@@ -69,8 +72,27 @@ python3 -m app.cli seed-profile --file prompts/user_manual.example.md
 python3 -m app.cli run-daily
 python3 -m app.cli run-server --host 0.0.0.0 --port 8000
 python3 -m app.cli run-weekly-report
+python3 -m app.cli generate-reflection --days 7
+python3 -m app.cli list-reflections
+python3 -m app.cli show-reflection --id 1
+python3 -m app.cli approve-reflection --id 1
+python3 -m app.cli apply-reflection --id 1
 python3 -m app.cli run-scheduler --no-poller
 python3 scripts/backup_sqlite.py
+```
+
+切到外部 `hermes-agent`：
+
+```env
+HERMES_REFLECTION_PROVIDER=hermes-agent
+HERMES_AGENT_COMMAND=hermes-agent reflect --json
+HERMES_AGENT_TIMEOUT_SECONDS=60
+```
+
+回滚到当前自研 reflection：
+
+```env
+HERMES_REFLECTION_PROVIDER=custom
 ```
 
 Telegram 兼容命令仍可用：

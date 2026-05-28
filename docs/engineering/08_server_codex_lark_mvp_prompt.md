@@ -71,7 +71,7 @@ openssl rand -hex 32
 通过飞书自定义机器人推送每日书籍推荐，每本书包含 5 个反馈链接；用户点击反馈链接后，后端写入 SQLite，并返回“已记录”。这是推荐 + 反馈 + 用户建模闭环的第一版。
 
 范围要求：
-1. 暂时不要接 Hermes。
+1. 飞书初版通道不要直接依赖 Hermes；Hermes 后续通过 reflection agent adapter 独立接入，不能影响飞书推荐与反馈闭环。
 2. 暂时不要接 OpenClaw。
 3. 暂时不要接 Telegram。
 4. 暂时不要做多用户系统。
@@ -160,4 +160,3 @@ HTTPS 443
 Nginx/Caddy 反向代理
 不直接暴露 8000
 ```
-

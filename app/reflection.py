@@ -10,6 +10,7 @@ from app.feedback import FEEDBACK_LABELS, FEEDBACK_REASON_LABELS
 from app.lark import LarkRobotClient
 from app.llm import OpenAIChatClient
 from app.profile import PROFILE_CATEGORIES
+from app.reflection_adapter import CustomLLMReflectionAdapter, ReflectionAgentAdapter
 from app.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -34,26 +35,32 @@ class HermesReflectionService:
         weekly_report_builder: Callable[[], str],
         lark: LarkRobotClient | None = None,
         memory_dir: Path = Path("memory"),
+        adapter: ReflectionAgentAdapter | None = None,
     ):
         self.repo = repo
         self.llm = llm
         self.weekly_report_builder = weekly_report_builder
         self.lark = lark
         self.memory_dir = memory_dir
+        self.adapter = adapter or CustomLLMReflectionAdapter(llm)
 
     def generate_reflection(self, days: int = 7, notify_lark: bool = True) -> int:
         days = _validated_days(days)
-        run_id = self.repo.create_run("hermes_reflection", {"days": days})
+        run_id = self.repo.create_run(
+            "hermes_reflection",
+            {"days": days, "reflection_adapter": self.adapter.name},
+        )
         api_calls = 0
         try:
             ensure_memory_layout(self.memory_dir)
             weekly_report = self.weekly_report_builder()
             context = build_reflection_context(self.repo, days, weekly_report)
             user_prompt = build_reflection_prompt(context)
-            response = self.llm.complete_json(REFLECTION_SYSTEM_PROMPT, user_prompt)
-            api_calls += 1 if getattr(self.llm, "api_key", "") else 0
+            result = self.adapter.generate_reflection(REFLECTION_SYSTEM_PROMPT, user_prompt, context)
+            response = result.response
+            api_calls += result.api_calls
             if not isinstance(response, dict):
-                raise ReflectionError("Hermes reflection LLM returned no JSON")
+                raise ReflectionError("Hermes reflection adapter returned no JSON")
 
             normalized = normalize_reflection_response(response)
             reflection_id = self.repo.add_reflection(
@@ -74,6 +81,8 @@ class HermesReflectionService:
 
             if notify_lark:
                 self._send_lark_summary(run_id, row)
+            for warning in result.warnings:
+                self.repo.record_run_warning(run_id, warning)
 
             self.repo.finish_run(run_id, "success", api_calls=api_calls)
             return reflection_id
