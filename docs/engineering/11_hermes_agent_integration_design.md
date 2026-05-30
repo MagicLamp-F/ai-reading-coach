@@ -155,7 +155,7 @@ Python 后端把输出规范化后写入：
 
 ```env
 HERMES_REFLECTION_PROVIDER=custom
-HERMES_AGENT_COMMAND=hermes-agent reflect --json
+HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
 HERMES_AGENT_TIMEOUT_SECONDS=60
 ```
 
@@ -163,7 +163,7 @@ HERMES_AGENT_TIMEOUT_SECONDS=60
 
 ```env
 HERMES_REFLECTION_PROVIDER=hermes-agent
-HERMES_AGENT_COMMAND=hermes-agent reflect --json
+HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
 HERMES_AGENT_TIMEOUT_SECONDS=60
 ```
 

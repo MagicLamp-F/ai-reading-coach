@@ -43,7 +43,7 @@ FEEDBACK_SECRET=change-me
 OPENAI_API_KEY=sk-xxx
 TAVILY_API_KEY=tvly-xxx
 HERMES_REFLECTION_PROVIDER=custom
-HERMES_AGENT_COMMAND=hermes-agent reflect --json
+HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
 ```
 
 启动反馈 HTTP 服务：
@@ -85,7 +85,7 @@ python3 scripts/backup_sqlite.py
 
 ```env
 HERMES_REFLECTION_PROVIDER=hermes-agent
-HERMES_AGENT_COMMAND=hermes-agent reflect --json
+HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
 HERMES_AGENT_TIMEOUT_SECONDS=60
 ```
 

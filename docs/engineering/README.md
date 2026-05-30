@@ -5,7 +5,7 @@
 ```text
 腾讯云国内轻量服务器
 + 国内模型/API
-+ 飞书作为第一交互入口，已进入 7 天试运行准备
++ 飞书作为第一交互入口
 + SQLite 事实记忆
 + Python 编排层
 + Hermes 长期记忆与反思层
@@ -24,8 +24,9 @@
 8. [服务器基础环境与 Codex 安装手册](./07_server_bootstrap_codex_manual.md)：腾讯云 Ubuntu、GLaDOS/mihomo、Codex CLI、中转 API 和交给服务器 Codex 的操作顺序。
 9. [服务器 Codex 执行 Prompt：飞书初版通道](./08_server_codex_lark_mvp_prompt.md)：在服务器 Codex 中粘贴执行的最终 Prompt。
 10. [7 天试运行 Runbook](./09_trial_run_runbook.md)：systemd、定时任务、备份恢复、日志和每日观察清单。
-11. [当前进展总结](./10_current_progress_summary.md)：截至 2026-05-26 的已完成能力、待验证事项和下一步工作。
+11. [当前进展总结](./10_current_progress_summary.md)：当前已完成能力、待验证事项和下一步工作。
 12. [hermes-agent 接入设计](./11_hermes_agent_integration_design.md)：Reflection Agent Adapter、hermes-agent CLI 接入、fallback、人审和回滚边界。
+13. [Hermes 记忆 Agent 与阅读中台设计](./12_hermes_memory_agent_platform.md)：整理 Hermes 主 Agent、wrapper、MCP/ACP、OpenClaw、飞书闭环、快速读完包、数据库与文件沉淀的长期架构。
 
 探索文档：
 

@@ -1,10 +1,10 @@
 # 当前进展总结
 
-更新时间：2026-05-26
+更新时间：2026-05-30
 
 ## 一句话状态
 
-AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP”的 7 天试运行准备阶段。当前核心闭环是：
+AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP + hermes-agent 接入边界”的基础搭建阶段。当前核心闭环是：
 
 ```text
 用户说明书 / SQLite 画像
@@ -15,6 +15,8 @@ AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP�
 -> 下一次 daily run 回写画像
 -> 每周生成 7 天画像复盘
 ```
+
+Hermes 侧已经完成安装和调用入口准备，但还没有完成真实模型推理 smoke test。因此当前只能说 `hermes-agent` 接入边界已就绪，不能说 Hermes 反思能力已经正式接通。
 
 ## 已完成
 
@@ -63,6 +65,17 @@ AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP�
 - 已提供 SQLite 备份脚本 `scripts/backup_sqlite.py`，默认保留最近 14 个备份。
 - 已提供 7 天试运行 Runbook：`docs/engineering/09_trial_run_runbook.md`。
 
+### Hermes 接入边界
+
+- `hermes-agent==0.14.0` 已安装到 `/home/ubuntu/projects/hermes-agent/.venv`。
+- Hermes CLI 可用：`hermes`、`hermes-agent`、`hermes-acp`。
+- 已在主项目中抽象 `ReflectionAgentAdapter`。
+- 已保留 `CustomLLMReflectionAdapter` 作为默认实现和 fallback。
+- 已新增 `HermesAgentCliAdapter`，通过外部命令接入 Hermes。
+- 当前推荐命令为 `/home/ubuntu/projects/hermes-agent/bin/reflect-json`。
+- `reflect-json` 负责 stdin JSON 到 Hermes oneshot 调用的协议适配，并在失败时以非 0 退出，方便主项目 fallback。
+- `generate-reflection` 仍只生成 draft；`approve-reflection` 和 `apply-reflection` 仍必须人工执行。
+
 ## 已验证
 
 自动化测试覆盖了以下关键点：
@@ -77,12 +90,14 @@ AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP�
 - 带原因反馈会写入 `feedback_events.reason_code`。
 - 自由文本补充会更新同一条反馈，并限制长度、转义 HTML。
 - 篡改签名会被拒绝。
+- reflection adapter 能向外部命令发送结构化契约，并在外部 agent 失败时 fallback。
+- 当前主项目测试记录为 55 tests OK。
 
 ## 尚未完成
 
 - 尚未升级为飞书应用机器人，当前反馈仍会打开浏览器页面。
 - 反馈去重和用户身份识别尚未实现；当前适合个人试运行。
-- Hermes 长期记忆和 `USER.md` / `MEMORY.md` patch 尚未接入。
+- Hermes 已完成安装和 adapter/wrapper 接入边界，但 Hermes -> 模型推理 -> JSON 输出尚未验证成功。
 - OpenClaw Gateway / Skill 执行层尚未接入。
 - 画像类别还未覆盖能量状态、探索倾向、自我叙事等维度。
 - 30 天用户模型报告尚未实现。
@@ -96,4 +111,6 @@ AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP�
 4. 点击每种反馈至少一次，确认原因选择页、入库和自由文本补充都正常。
 5. 启动 daily/weekly systemd timer，按 `09_trial_run_runbook.md` 观察 7 天。
 6. 7 天后复盘真实反馈，决定是否调整原因选项、画像更新规则和推荐 prompt。
-7. 试运行稳定后，再进入飞书应用机器人、Hermes 和 Skill 化改造。
+7. 配置一个腾讯云服务器可访问的模型 API endpoint，完成 `reflect-json --debug-smoke`。
+8. smoke test 通过后，使用 `HERMES_REFLECTION_PROVIDER=hermes-agent` 生成一份 reflection draft，验证 fallback、入库和人工审批链路。
+9. 试运行稳定后，再进入飞书应用机器人、Hermes route 化、快速读完包、OpenClaw 和 Skill 化改造。

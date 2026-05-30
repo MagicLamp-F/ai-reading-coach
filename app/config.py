@@ -53,7 +53,10 @@ class Settings:
             max_daily_search_calls=int(os.getenv("MAX_DAILY_SEARCH_CALLS", "6")),
             max_daily_model_calls=int(os.getenv("MAX_DAILY_MODEL_CALLS", "4")),
             hermes_reflection_provider=os.getenv("HERMES_REFLECTION_PROVIDER", "custom").strip().lower(),
-            hermes_agent_command=os.getenv("HERMES_AGENT_COMMAND", "hermes-agent reflect --json"),
+            hermes_agent_command=os.getenv(
+                "HERMES_AGENT_COMMAND",
+                "/home/ubuntu/projects/hermes-agent/bin/reflect-json",
+            ),
             hermes_agent_timeout_seconds=float(os.getenv("HERMES_AGENT_TIMEOUT_SECONDS", "60")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )

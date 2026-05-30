@@ -11,7 +11,7 @@
 ```text
 腾讯云国内轻量服务器
 + 国内模型/API
-+ 飞书作为第一交互入口，已进入 7 天试运行准备
++ 飞书作为第一交互入口
 + SQLite 事实记忆
 + Python 编排层
 + Hermes 长期记忆与反思层
@@ -29,11 +29,12 @@
 - 飞书怎么先接入。
 - 服务器基础环境和 Codex 怎么安装配置。
 - 如何运行、观测和验收。
-- 当前代码和文档已经完成到哪里。
+- Hermes、OpenClaw、飞书、数据库和文件系统如何共同支撑长期阅读画像与阅读历程。
 
 当前进展：
 
 - [当前进展总结](./engineering/10_current_progress_summary.md)
+- [Hermes 记忆 Agent 与阅读中台设计](./engineering/12_hermes_memory_agent_platform.md)
 - [7 天试运行 Runbook](./engineering/09_trial_run_runbook.md)
 
 ## 探索性文档

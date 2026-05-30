@@ -64,7 +64,7 @@ class HermesAgentCliAdapter:
 
     def __init__(
         self,
-        command: str = "hermes-agent reflect --json",
+        command: str = "/home/ubuntu/projects/hermes-agent/bin/reflect-json",
         timeout_seconds: float = 60.0,
         runner=subprocess.run,
     ):

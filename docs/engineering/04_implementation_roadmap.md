@@ -2,14 +2,14 @@
 
 ## 当前状态快照
 
-截至 2026-05-28，项目已经从早期 Telegram MVP 推进到“飞书优先 MVP + hermes-agent 接入边界”的试运行准备状态：
+截至 2026-05-29，项目已经从早期 Telegram MVP 推进到“飞书优先 MVP + hermes-agent 接入边界”的试运行准备状态：
 
 - 阶段 0 基本完成：项目包含 Docker、systemd service/timer、备份脚本和服务器 Runbook。
 - 阶段 1 完成：SQLite、用户说明书导入、每日推荐、反馈回写画像、7 天复盘和基础测试已具备。
 - 阶段 2 完成初版：飞书自定义机器人卡片、反馈链接、签名校验、原因选择页和反馈 HTTP 服务已实现。
 - 阶段 3 完成初版：推荐记录和飞书卡片已包含 `system_hypothesis` 与 `profile_dimensions`。
 - 阶段 4 部分完成：`reason_code`、原因选择页、自由文本补充和部分画像更新规则已实现；仍需用真实 7 天反馈验证原因体系是否足够。
-- 阶段 7 已完成接入边界初版：新增 reflection agent adapter，`hermes-agent` 可作为外部实现接入，当前 custom reflection 保留为 fallback；仍需部署真实 hermes-agent 并用 7 天数据验证输出质量。
+- 阶段 7 已完成接入边界初版：新增 reflection agent adapter，`hermes-agent` 已安装到 `/home/ubuntu/projects/hermes-agent`，通过外部 `reflect-json` wrapper 接入；当前 custom reflection 保留为 fallback，仍需用 7 天数据验证输出质量。
 - 阶段 8 以后尚未开始：OpenClaw、Skill 化和 30 天报告仍是后续方向。
 
 ## 阶段 0：基础设施准备
@@ -182,7 +182,7 @@ Ubuntu 24.04 LTS
 
 目标：让 Hermes 负责长期记忆和周期性反思。
 
-状态：接入边界初版完成，真实 hermes-agent 部署与质量验证待完成。
+状态：接入边界初版完成，`hermes-agent==0.14.0` 已在同级目录独立 venv 安装；质量验证待完成。
 
 改动：
 
@@ -192,7 +192,7 @@ Ubuntu 24.04 LTS
 - 新增 `reflections` 表保存反思结果。
 - 新增 `ReflectionAgentAdapter` 抽象。
 - 保留当前 custom LLM reflection 作为默认实现和 fallback。
-- 新增 `hermes-agent` CLI adapter，使用 stdin/stdout JSON 契约接入外部 agent。
+- 新增 `hermes-agent` CLI adapter，使用 stdin/stdout JSON 契约接入外部 `reflect-json` wrapper。
 - 初期 memory patch 需要人工确认。
 
 验收：

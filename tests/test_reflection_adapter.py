@@ -70,13 +70,17 @@ class ReflectionAdapterTests(unittest.TestCase):
             )
             return subprocess.CompletedProcess(argv, 0, stdout='{"period_summary":"agent"}', stderr="")
 
-        adapter = HermesAgentCliAdapter("hermes-agent reflect --json", timeout_seconds=12, runner=runner)
+        adapter = HermesAgentCliAdapter(
+            "/home/ubuntu/projects/hermes-agent/bin/reflect-json",
+            timeout_seconds=12,
+            runner=runner,
+        )
 
         result = adapter.generate_reflection("system", "user", {"days": 7})
 
         self.assertEqual(result.provider, "hermes-agent")
         self.assertEqual(result.response["period_summary"], "agent")
-        self.assertEqual(calls[0]["argv"], ["hermes-agent", "reflect", "--json"])
+        self.assertEqual(calls[0]["argv"], ["/home/ubuntu/projects/hermes-agent/bin/reflect-json"])
         self.assertEqual(calls[0]["timeout"], 12)
         self.assertTrue(calls[0]["payload"]["constraints"]["human_approval_required"])
         self.assertTrue(calls[0]["payload"]["constraints"]["do_not_apply_patches"])
