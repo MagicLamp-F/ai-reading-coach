@@ -27,6 +27,7 @@
 11. [当前进展总结](./10_current_progress_summary.md)：当前已完成能力、待验证事项和下一步工作。
 12. [hermes-agent 接入设计](./11_hermes_agent_integration_design.md)：Reflection Agent Adapter、hermes-agent CLI 接入、fallback、人审和回滚边界。
 13. [Hermes 记忆 Agent 与阅读中台设计](./12_hermes_memory_agent_platform.md)：整理 Hermes 主 Agent、wrapper、MCP/ACP、OpenClaw、飞书闭环、快速读完包、数据库与文件沉淀的长期架构。
+14. [Hermes 基础架构与接入状态](./13_hermes_foundation_architecture_status.md)：当前 Hermes wrapper、模型配置、验证结果、失败边界和下一步路线。
 
 探索文档：
 

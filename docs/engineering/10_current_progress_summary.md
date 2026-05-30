@@ -16,7 +16,7 @@ AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP +
 -> 每周生成 7 天画像复盘
 ```
 
-Hermes 侧已经完成安装和调用入口准备，但还没有完成真实模型推理 smoke test。因此当前只能说 `hermes-agent` 接入边界已就绪，不能说 Hermes 反思能力已经正式接通。
+Hermes 侧已经完成安装、调用入口准备和真实模型推理 smoke test。当前已经可以通过 `HERMES_REFLECTION_PROVIDER=hermes-agent` 生成 reflection draft，但仍必须人工审批后才能写入长期记忆。
 
 ## 已完成
 
@@ -74,6 +74,8 @@ Hermes 侧已经完成安装和调用入口准备，但还没有完成真实模�
 - 已新增 `HermesAgentCliAdapter`，通过外部命令接入 Hermes。
 - 当前推荐命令为 `/home/ubuntu/projects/hermes-agent/bin/reflect-json`。
 - `reflect-json` 负责 stdin JSON 到 Hermes oneshot 调用的协议适配，并在失败时以非 0 退出，方便主项目 fallback。
+- `reflect-json --debug-smoke` 已能通过 Hermes 返回可见模型输出。
+- 主项目已通过 hermes-agent provider 生成 reflection draft：`id=3`，状态为 `draft`。
 - `generate-reflection` 仍只生成 draft；`approve-reflection` 和 `apply-reflection` 仍必须人工执行。
 
 ## 已验证
@@ -97,7 +99,7 @@ Hermes 侧已经完成安装和调用入口准备，但还没有完成真实模�
 
 - 尚未升级为飞书应用机器人，当前反馈仍会打开浏览器页面。
 - 反馈去重和用户身份识别尚未实现；当前适合个人试运行。
-- Hermes 已完成安装和 adapter/wrapper 接入边界，但 Hermes -> 模型推理 -> JSON 输出尚未验证成功。
+- Hermes reflection 链路已经接通，但还未进入连续运行和质量验证阶段。
 - OpenClaw Gateway / Skill 执行层尚未接入。
 - 画像类别还未覆盖能量状态、探索倾向、自我叙事等维度。
 - 30 天用户模型报告尚未实现。
@@ -111,6 +113,6 @@ Hermes 侧已经完成安装和调用入口准备，但还没有完成真实模�
 4. 点击每种反馈至少一次，确认原因选择页、入库和自由文本补充都正常。
 5. 启动 daily/weekly systemd timer，按 `09_trial_run_runbook.md` 观察 7 天。
 6. 7 天后复盘真实反馈，决定是否调整原因选项、画像更新规则和推荐 prompt。
-7. 配置一个腾讯云服务器可访问的模型 API endpoint，完成 `reflect-json --debug-smoke`。
-8. smoke test 通过后，使用 `HERMES_REFLECTION_PROVIDER=hermes-agent` 生成一份 reflection draft，验证 fallback、入库和人工审批链路。
+7. 连续运行 1-2 次 `generate-reflection --days 7 --no-lark`，观察 Hermes 输出质量。
+8. 人工审查 draft，再决定是否执行 `approve-reflection` 和 `apply-reflection`。
 9. 试运行稳定后，再进入飞书应用机器人、Hermes route 化、快速读完包、OpenClaw 和 Skill 化改造。

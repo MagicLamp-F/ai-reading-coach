@@ -24,7 +24,9 @@
 - 主项目测试已通过，当前记录为 55 个测试 OK。
 - 已补 `/home/ubuntu/projects/hermes-agent/bin/reflect-json`，作为 `ai-reading-coach` 调用 Hermes 的 wrapper。
 - wrapper 能看到 API key、model、base_url 已设置，但不能打印密钥。
-- 真实 smoke test 调用 Hermes 后，Hermes 退出码是 0，但 stdout 为空，wrapper 因拿不到 JSON 报错：`hermes returned invalid JSON: no JSON object found`。
+- Hermes 已通过交互式模型配置完成 provider/model/API 配置。
+- `reflect-json --debug-smoke` 已能通过 Hermes 返回可见模型输出。
+- `generate-reflection --days 7 --no-lark` 已通过 hermes-agent provider 生成 `draft` reflection。
 
 因此当前结论是：
 
@@ -32,10 +34,10 @@
 Hermes 已安装。
 CLI 已可运行。
 ai-reading-coach 的调用入口已准备。
-但 Hermes -> 模型推理 -> JSON 返回 尚未验证成功。
+Hermes -> 模型推理 -> JSON 返回 已验证成功。
 ```
 
-当前不能声称 `hermes-agent` 已真正可用，只能说接入入口已经存在，失败时仍应 fallback 到当前 custom reflection。
+当前可以说 `hermes-agent` 的 reflection 基础链路已经接通；失败时仍应 fallback 到当前 custom reflection。
 
 建议配置仍是：
 
@@ -44,7 +46,7 @@ HERMES_REFLECTION_PROVIDER=hermes-agent
 HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
 ```
 
-但只有在 smoke test 能证明 Hermes 完成真实模型调用并返回合法 JSON 后，才可以把它视为正式接通。
+当前 smoke test 已证明 Hermes 能完成真实模型调用并返回业务可消费的 JSON。下一步重点是连续运行和质量验证。
 
 ## 3. Hermes 是什么，不是什么
 

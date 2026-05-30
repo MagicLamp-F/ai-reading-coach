@@ -35,6 +35,7 @@
 
 - [当前进展总结](./engineering/10_current_progress_summary.md)
 - [Hermes 记忆 Agent 与阅读中台设计](./engineering/12_hermes_memory_agent_platform.md)
+- [Hermes 基础架构与接入状态](./engineering/13_hermes_foundation_architecture_status.md)
 - [7 天试运行 Runbook](./engineering/09_trial_run_runbook.md)
 
 ## 探索性文档
