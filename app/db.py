@@ -113,11 +113,72 @@ def init_db(conn: sqlite3.Connection) -> None:
             applied_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS artifacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            artifact_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            sha256 TEXT NOT NULL,
+            content_type TEXT NOT NULL DEFAULT 'text/markdown',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS reading_packs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            artifact_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'generated' CHECK(status IN ('generated', 'fallback', 'failed')),
+            route TEXT NOT NULL DEFAULT 'reading.fast_read_pack',
+            schema_version TEXT NOT NULL DEFAULT 'fast_read_pack_v1',
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            content_json TEXT NOT NULL DEFAULT '{}',
+            generator_provider TEXT NOT NULL DEFAULT '',
+            error_message TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(recommendation_id) REFERENCES recommendations(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS book_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'official_page',
+            url TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            text_excerpt TEXT NOT NULL DEFAULT '',
+            raw_metadata_json TEXT NOT NULL DEFAULT '{}',
+            fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            UNIQUE(book_id, url)
+        );
+
+        CREATE TABLE IF NOT EXISTS reading_pack_sources (
+            reading_pack_id INTEGER NOT NULL,
+            book_source_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(reading_pack_id, book_source_id),
+            FOREIGN KEY(reading_pack_id) REFERENCES reading_packs(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_source_id) REFERENCES book_sources(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_profile_category_weight ON profile_items(category, weight DESC, confidence DESC);
         CREATE INDEX IF NOT EXISTS idx_feedback_unprocessed ON feedback_events(processed_at);
         CREATE INDEX IF NOT EXISTS idx_recommendations_date ON recommendations(recommendation_date);
         CREATE INDEX IF NOT EXISTS idx_cost_logs_run ON cost_logs(run_id);
         CREATE INDEX IF NOT EXISTS idx_reflections_status_created ON reflections(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_type_created ON artifacts(artifact_type, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reading_packs_recommendation ON reading_packs(recommendation_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reading_packs_book ON reading_packs(book_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_book_sources_book ON book_sources(book_id, fetched_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reading_pack_sources_source ON reading_pack_sources(book_source_id);
         """
     )
     _ensure_column(conn, "recommendations", "system_hypothesis", "TEXT NOT NULL DEFAULT ''")

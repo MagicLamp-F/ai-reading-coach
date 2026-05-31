@@ -34,13 +34,13 @@ ReflectionAgentAdapter
 reflections draft row
   |
   v
-human approve-reflection
-  |
-  v
-human apply-reflection
+manual approve/apply or automatic approve/apply
   |
   v
 memory/USER.md + memory/MEMORY.md
+  |
+  v
+memory/change_logs/YYYY-MM-DD_reflection_<id>_<mode>.md
   |
   v
 run-daily reads applied memory only
@@ -59,7 +59,8 @@ run-daily reads applied memory only
 - 写入 `reflections` 表。
 - 写 `memory/reflections/reflection_{id}.md` 草稿。
 - 可选发送飞书“待人工确认”摘要。
-- 执行 `approve-reflection` 和 `apply-reflection`。
+- 执行手动 `approve-reflection` / `apply-reflection`，或在开启配置后自动 approve/apply。
+- 自动 apply 时写入 `memory/change_logs` 审计文件。
 
 新增的 `app/reflection_adapter.py` 只负责生成草稿：
 
@@ -91,8 +92,8 @@ run-daily reads applied memory only
 
 约束明确写入 payload：
 
-- 不自动 apply patch。
-- 必须人工审批。
+- agent 不直接 apply patch。
+- 是否自动 apply 由 Python 后端配置控制。
 - 不修改 SQLite。
 - 不发送消息。
 
@@ -127,17 +128,27 @@ Python 后端把输出规范化后写入：
 
 ## 6. 必须人工审批的步骤
 
-以下步骤必须人工执行：
+默认情况下仍可人工执行：
 
 - `approve-reflection --id <id>`：把草稿从 `draft` 标记为 `approved`。
 - `apply-reflection --id <id>`：只允许对 `approved` 草稿追加写入长期记忆。
 
 禁止行为：
 
-- `generate-reflection` 后自动 apply。
+- `hermes-agent` 自己直接 apply。
 - `hermes-agent` 直接写 `USER.md` / `MEMORY.md`。
 - `hermes-agent` 直接更新画像表。
 - 让 daily recommendation 使用 draft reflection。
+
+如果用户希望全链路自动化，可以启用：
+
+```env
+HERMES_REFLECTION_AUTO_APPLY=true
+DAILY_REFLECTION_ENABLED=true
+DAILY_REFLECTION_DAYS=1
+```
+
+此时 `run-daily` 完成推荐后会自动生成 reflection，自动 approve/apply，并写入 `memory/change_logs`。失败只记录 warning，不中断日推。
 
 ## 7. 失败降级策略
 
@@ -157,6 +168,9 @@ Python 后端把输出规范化后写入：
 HERMES_REFLECTION_PROVIDER=custom
 HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
 HERMES_AGENT_TIMEOUT_SECONDS=60
+HERMES_REFLECTION_AUTO_APPLY=false
+DAILY_REFLECTION_ENABLED=false
+DAILY_REFLECTION_DAYS=1
 ```
 
 切到 hermes-agent：
@@ -181,6 +195,12 @@ HERMES_REFLECTION_PROVIDER=custom
 
 ```bash
 python3 -m app.cli generate-reflection --days 7
+```
+
+生成并自动应用：
+
+```bash
+python3 -m app.cli generate-reflection --days 1 --auto-apply
 ```
 
 查看草稿：
@@ -215,6 +235,7 @@ python3 -m app.cli run-daily
 - hermes-agent 成功时，输出写入 `reflections` 的 `draft` 记录。
 - hermes-agent 失败时，自动 fallback 到 custom reflection，并在 run log 写 warning。
 - primary 和 fallback 都失败时，只失败本次 reflection run，不影响 `run-daily`。
-- `approve-reflection` 和 `apply-reflection` 仍必须人工执行。
+- 默认人工 approve/apply 仍可用；启用 `HERMES_REFLECTION_AUTO_APPLY=true` 后可自动 apply。
+- 自动 apply 必须写入 `memory/change_logs` 审计文件。
 - draft reflection 不会进入每日推荐上下文；只有已应用的 `USER.md` / `MEMORY.md` 会被 `run-daily` 读取。
 - Feishu 推送、反馈链接、SQLite 画像回写和 weekly report 不被修改。

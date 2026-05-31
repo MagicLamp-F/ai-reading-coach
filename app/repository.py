@@ -24,6 +24,31 @@ class RecommendationDraft:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ReadingPackDraft:
+    recommendation_id: int
+    book_id: int
+    artifact_id: int | None
+    status: str
+    route: str
+    schema_version: str
+    title: str
+    summary: str
+    content: dict[str, Any]
+    generator_provider: str
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class BookSourceDraft:
+    book_id: int
+    source_type: str
+    url: str
+    title: str
+    text_excerpt: str
+    metadata: dict[str, Any]
+
+
 class Repository:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -288,6 +313,196 @@ class Repository:
                 LIMIT ?
                 """,
                 (f"-{days} days", limit),
+            )
+        )
+
+    def get_recommendation_detail(self, recommendation_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT
+                r.*,
+                b.id AS book_id,
+                b.title,
+                b.author,
+                b.source_url,
+                b.metadata_json
+            FROM recommendations r
+            JOIN books b ON b.id = r.book_id
+            WHERE r.id = ?
+            """,
+            (recommendation_id,),
+        ).fetchone()
+
+    def add_or_update_artifact(
+        self,
+        artifact_type: str,
+        title: str,
+        path: str,
+        sha256: str,
+        content_type: str,
+        metadata: dict[str, Any],
+    ) -> int:
+        self.conn.execute(
+            """
+            INSERT INTO artifacts(artifact_type, title, path, sha256, content_type, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                artifact_type = excluded.artifact_type,
+                title = excluded.title,
+                sha256 = excluded.sha256,
+                content_type = excluded.content_type,
+                metadata_json = excluded.metadata_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                artifact_type,
+                title,
+                path,
+                sha256,
+                content_type,
+                json.dumps(metadata, ensure_ascii=False),
+            ),
+        )
+        row = self.conn.execute("SELECT id FROM artifacts WHERE path = ?", (path,)).fetchone()
+        if row is None:
+            raise RuntimeError("Artifact upsert failed")
+        return int(row["id"])
+
+    def add_reading_pack(self, draft: ReadingPackDraft) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO reading_packs(
+                recommendation_id,
+                book_id,
+                artifact_id,
+                status,
+                route,
+                schema_version,
+                title,
+                summary,
+                content_json,
+                generator_provider,
+                error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.recommendation_id,
+                draft.book_id,
+                draft.artifact_id,
+                draft.status,
+                draft.route,
+                draft.schema_version,
+                draft.title,
+                draft.summary,
+                json.dumps(draft.content, ensure_ascii=False),
+                draft.generator_provider,
+                draft.error_message,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def upsert_book_source(self, draft: BookSourceDraft) -> int:
+        self.conn.execute(
+            """
+            INSERT INTO book_sources(
+                book_id,
+                source_type,
+                url,
+                title,
+                text_excerpt,
+                raw_metadata_json,
+                fetched_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(book_id, url) DO UPDATE SET
+                source_type = excluded.source_type,
+                title = excluded.title,
+                text_excerpt = excluded.text_excerpt,
+                raw_metadata_json = excluded.raw_metadata_json,
+                fetched_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                draft.book_id,
+                draft.source_type,
+                draft.url,
+                draft.title,
+                draft.text_excerpt,
+                json.dumps(draft.metadata, ensure_ascii=False),
+            ),
+        )
+        row = self.conn.execute(
+            "SELECT id FROM book_sources WHERE book_id = ? AND url = ?",
+            (draft.book_id, draft.url),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Book source upsert failed")
+        return int(row["id"])
+
+    def book_sources_for_book(self, book_id: int, limit: int = 5) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT *
+                FROM book_sources
+                WHERE book_id = ?
+                ORDER BY fetched_at DESC, id DESC
+                LIMIT ?
+                """,
+                (book_id, limit),
+            )
+        )
+
+    def link_reading_pack_sources(self, reading_pack_id: int, book_source_ids: list[int]) -> None:
+        for book_source_id in dict.fromkeys(book_source_ids):
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO reading_pack_sources(reading_pack_id, book_source_id)
+                VALUES (?, ?)
+                """,
+                (reading_pack_id, book_source_id),
+            )
+
+    def reading_pack_sources(self, reading_pack_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT bs.*
+                FROM reading_pack_sources rps
+                JOIN book_sources bs ON bs.id = rps.book_source_id
+                WHERE rps.reading_pack_id = ?
+                ORDER BY rps.created_at ASC, bs.id ASC
+                """,
+                (reading_pack_id,),
+            )
+        )
+
+    def get_reading_pack(self, reading_pack_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT rp.*, a.path AS artifact_path, a.sha256 AS artifact_sha256, b.title AS book_title, b.author AS book_author
+            FROM reading_packs rp
+            LEFT JOIN artifacts a ON a.id = rp.artifact_id
+            JOIN books b ON b.id = rp.book_id
+            WHERE rp.id = ?
+            """,
+            (reading_pack_id,),
+        ).fetchone()
+
+    def list_reading_packs(self, limit: int = 20) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT rp.id, rp.recommendation_id, rp.status, rp.title, rp.summary, rp.created_at,
+                    a.path AS artifact_path, b.title AS book_title, b.author AS book_author
+                FROM reading_packs rp
+                LEFT JOIN artifacts a ON a.id = rp.artifact_id
+                JOIN books b ON b.id = rp.book_id
+                ORDER BY rp.created_at DESC, rp.id DESC
+                LIMIT ?
+                """,
+                (limit,),
             )
         )
 

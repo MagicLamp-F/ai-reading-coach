@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 REFLECTION_SYSTEM_PROMPT = (
     "你是 Hermes，阅读私教系统的长期记忆与反思层。"
-    "你的任务是基于结构化 SQLite 数据和本周复盘，提出可人工审核的长期记忆更新建议。"
+    "你的任务是基于结构化 SQLite 数据和本周复盘，提出可审计的长期记忆更新建议。"
     "只输出 JSON，不要输出 Markdown 包裹。不要编造没有证据的事实；不确定时写入系统可能误解或反思问题。"
 )
 
@@ -44,7 +44,7 @@ class HermesReflectionService:
         self.memory_dir = memory_dir
         self.adapter = adapter or CustomLLMReflectionAdapter(llm)
 
-    def generate_reflection(self, days: int = 7, notify_lark: bool = True) -> int:
+    def generate_reflection(self, days: int = 7, notify_lark: bool = True, auto_apply: bool = False) -> int:
         days = _validated_days(days)
         run_id = self.repo.create_run(
             "hermes_reflection",
@@ -79,6 +79,14 @@ class HermesReflectionService:
                 raise ReflectionError(f"Reflection insert failed: id={reflection_id}")
             write_reflection_markdown(row, self.memory_dir)
 
+            if auto_apply:
+                self.approve_reflection(reflection_id)
+                self.apply_reflection(reflection_id, apply_mode="auto")
+                row = self.repo.get_reflection(reflection_id)
+                if row is None:
+                    raise ReflectionError(f"Reflection disappeared after auto apply: id={reflection_id}")
+                write_reflection_markdown(row, self.memory_dir)
+
             if notify_lark:
                 self._send_lark_summary(run_id, row)
             for warning in result.warnings:
@@ -98,7 +106,7 @@ class HermesReflectionService:
             row = self.repo.get_reflection(reflection_id)
             raise ReflectionError(f"Reflection must be draft to approve: id={reflection_id}, status={row['status']}")
 
-    def apply_reflection(self, reflection_id: int) -> None:
+    def apply_reflection(self, reflection_id: int, apply_mode: str = "manual") -> Path:
         row = self.repo.get_reflection(reflection_id)
         if row is None:
             raise ReflectionError(f"Reflection not found: id={reflection_id}")
@@ -111,6 +119,10 @@ class HermesReflectionService:
         append_patch(self.memory_dir / "MEMORY.md", reflection_id, applied_at, row["memory_md_patch"])
         if not self.repo.mark_reflection_applied(reflection_id):
             raise ReflectionError(f"Reflection apply state update failed: id={reflection_id}")
+        applied_row = self.repo.get_reflection(reflection_id)
+        if applied_row is None:
+            raise ReflectionError(f"Reflection not found after apply: id={reflection_id}")
+        return write_reflection_change_log(applied_row, self.memory_dir, apply_mode, applied_at)
 
     def _send_lark_summary(self, run_id: int, row: Any) -> None:
         if self.lark is None or not self.lark.enabled():
@@ -132,6 +144,7 @@ def ensure_memory_layout(memory_dir: Path = Path("memory")) -> None:
     memory_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / "patches").mkdir(parents=True, exist_ok=True)
     (memory_dir / "reflections").mkdir(parents=True, exist_ok=True)
+    (memory_dir / "change_logs").mkdir(parents=True, exist_ok=True)
     _ensure_file(memory_dir / "USER.md", "# USER\n\n")
     _ensure_file(memory_dir / "MEMORY.md", "# MEMORY\n\n")
 
@@ -184,7 +197,7 @@ def build_reflection_prompt(context: dict[str, Any]) -> str:
         "约束：\n"
         "- USER.md patch 只写稳定或高价值的用户画像更新建议。\n"
         "- MEMORY.md patch 写系统反思、误解修正、下周推荐策略和待验证问题。\n"
-        "- patch 不要声明已经应用；当前只是待人工确认。\n"
+        "- patch 不要声明已经应用；是否自动应用由后端控制，并会写审计记录。\n"
         "- 如果证据不足，用保守措辞并放入 reflection_questions。\n\n"
         "证据上下文：\n"
         f"{json.dumps(context, ensure_ascii=False, indent=2)}"
@@ -217,6 +230,28 @@ def write_reflection_markdown(row: Any, memory_dir: Path = Path("memory")) -> Pa
     ensure_memory_layout(memory_dir)
     path = memory_dir / "reflections" / f"reflection_{row['id']}.md"
     content = format_reflection_markdown(row)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def write_reflection_change_log(row: Any, memory_dir: Path, apply_mode: str, applied_at: str) -> Path:
+    ensure_memory_layout(memory_dir)
+    safe_mode = "auto" if apply_mode == "auto" else "manual"
+    date_prefix = applied_at[:10]
+    path = memory_dir / "change_logs" / f"{date_prefix}_reflection_{row['id']}_{safe_mode}.md"
+    content = (
+        f"# Reflection Change Log {row['id']}\n\n"
+        f"- Mode: {safe_mode}\n"
+        f"- Status: {row['status']}\n"
+        f"- Applied at: {applied_at}\n"
+        f"- Period: {row['period_start']} to {row['period_end']}\n\n"
+        "## Summary\n\n"
+        f"{row['summary']}\n\n"
+        "## USER.md Patch\n\n"
+        f"{row['user_md_patch'] or '(empty)'}\n\n"
+        "## MEMORY.md Patch\n\n"
+        f"{row['memory_md_patch'] or '(empty)'}\n"
+    )
     path.write_text(content, encoding="utf-8")
     return path
 
@@ -264,6 +299,16 @@ def format_reflection_list(rows: list[Any]) -> str:
 def format_lark_reflection_summary(row: Any) -> str:
     questions = _loads(row["next_questions_json"], [])
     question_lines = _markdown_list(questions[:5])
+    if row["status"] == "applied":
+        return (
+            "Hermes 反思已自动应用\n\n"
+            f"reflection_id: {row['id']}\n"
+            f"周期: {row['period_start']} 至 {row['period_end']}\n\n"
+            f"摘要:\n{row['summary']}\n\n"
+            "反思问题:\n"
+            f"{question_lines}\n\n"
+            "本次 USER.md / MEMORY.md 修改已写入 memory/change_logs。"
+        )
     return (
         "Hermes 反思草稿（待人工确认）\n\n"
         f"reflection_id: {row['id']}\n"

@@ -70,6 +70,24 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("memory_md_patch", columns)
         self.assertIn("status", columns)
 
+    def test_init_db_creates_reading_pack_tables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            init_db(conn)
+            artifact_columns = {row["name"] for row in conn.execute("PRAGMA table_info(artifacts)")}
+            pack_columns = {row["name"] for row in conn.execute("PRAGMA table_info(reading_packs)")}
+            source_columns = {row["name"] for row in conn.execute("PRAGMA table_info(book_sources)")}
+            link_columns = {row["name"] for row in conn.execute("PRAGMA table_info(reading_pack_sources)")}
+            conn.close()
+
+        self.assertIn("path", artifact_columns)
+        self.assertIn("sha256", artifact_columns)
+        self.assertIn("recommendation_id", pack_columns)
+        self.assertIn("artifact_id", pack_columns)
+        self.assertIn("content_json", pack_columns)
+        self.assertIn("text_excerpt", source_columns)
+        self.assertIn("book_source_id", link_columns)
+
 
 if __name__ == "__main__":
     unittest.main()

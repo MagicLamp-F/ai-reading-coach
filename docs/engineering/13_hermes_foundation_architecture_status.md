@@ -24,7 +24,7 @@ ai-reading-coach
 - `approve-reflection` 和 `apply-reflection` 仍然必须人工执行。
 - `run-daily` 不依赖 Hermes 实时调用，不会因为 Hermes 失败而中断。
 
-当前基础搭建可以认为完成一半：长期记忆反思链路已经接通，但更长期的 route 化协议、快速读完包、OpenClaw 候选书来源、artifact 数据库和业务总览页面尚未开始。
+当前基础搭建可以认为完成一半以上：长期记忆反思链路已经接通，快速读完包的 SQLite/artifact/飞书预览链路已经完成初版；更长期的 Hermes fast-read route adapter、OpenClaw 候选书来源和业务总览页面尚未开始。
 
 ## 2. 当前组件分工
 
@@ -117,6 +117,18 @@ memory_md_patch
 ```
 
 Python 后端随后负责规范化、入库和写草稿 Markdown。
+
+当前 reflection payload 已在兼容旧 `task` 字段的同时，增加 route 化字段：
+
+```text
+route=reading.reflection.generate
+domain=reading
+memory_scope=user_profile, reading_profile, book_history
+tool_policy=none
+output_schema=reflection_v1
+```
+
+这只是 route 化协议的第一步，不改变 wrapper 调用方式；后续 `reading.fast_read_pack`、`reading.recommend.rank` 可以沿用同一结构。
 
 ## 5. Hermes 模型配置
 
@@ -232,4 +244,3 @@ HERMES_REFLECTION_PROVIDER=custom
 ```
 
 无需改飞书、SQLite、反馈服务或 daily recommendation。
-

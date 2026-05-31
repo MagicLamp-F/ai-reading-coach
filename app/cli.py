@@ -13,6 +13,7 @@ from app.logging_setup import configure_logging
 from app.metrics import MetricsServer
 from app.poller import TelegramPoller
 from app.profile import seed_user_manual
+from app.reading_pack import FastReadPackService
 from app.reflection import (
     HermesReflectionService,
     ReflectionError,
@@ -39,12 +40,26 @@ def main() -> None:
     subparsers.add_parser("run-daily", help="Run one daily recommendation workflow")
     subparsers.add_parser("run-weekly-report", help="Send one weekly profile report")
 
+    reading_pack = subparsers.add_parser("generate-reading-pack", help="Generate a fast read pack for a recommendation")
+    reading_pack.add_argument("--recommendation-id", type=int, required=True, help="Recommendation id")
+    reading_pack.add_argument("--library-dir", default="library", help="Directory for long-form reading artifacts")
+
     reflection_generate = subparsers.add_parser("generate-reflection", help="Generate a Hermes reflection draft")
     reflection_generate.add_argument("--days", type=int, default=7, help="Number of recent days to reflect on")
     reflection_generate.add_argument(
         "--no-lark",
         action="store_true",
         help="Do not send the pending-review Lark summary after generation",
+    )
+    reflection_generate.add_argument(
+        "--auto-apply",
+        action="store_true",
+        help="Automatically approve and apply the generated reflection, writing an audit change log",
+    )
+    reflection_generate.add_argument(
+        "--no-auto-apply",
+        action="store_true",
+        help="Disable auto-apply even when HERMES_REFLECTION_AUTO_APPLY=true",
     )
 
     reflection_approve = subparsers.add_parser("approve-reflection", help="Approve a Hermes reflection draft")
@@ -89,6 +104,8 @@ def main() -> None:
 
     if args.command == "run-daily":
         run_id = context.workflow.run_daily_recommendations()
+        if settings.daily_reflection_enabled:
+            _run_daily_reflection(context, settings, run_id)
         print(f"Daily recommendation run completed: run_id={run_id}")
         return
 
@@ -97,7 +114,28 @@ def main() -> None:
         print("Weekly report sent")
         return
 
+    if args.command == "generate-reading-pack":
+        service = FastReadPackService(
+            repo=context.repo,
+            llm=context.workflow.llm,
+            memory_dir=context.workflow.memory_dir,
+            library_dir=Path(args.library_dir),
+            max_memory_chars=context.workflow.max_memory_chars,
+            agent=context.reading_pack_agent,
+            source_collector=context.source_collector,
+        )
+        result = service.generate_for_recommendation(args.recommendation_id)
+        print(f"Fast read pack generated: id={result.reading_pack_id}")
+        print(f"Status: {result.status}")
+        print(f"Artifact: {result.artifact_path}")
+        return
+
     if args.command == "generate-reflection":
+        auto_apply = settings.hermes_reflection_auto_apply
+        if args.auto_apply:
+            auto_apply = True
+        if args.no_auto_apply:
+            auto_apply = False
         service = HermesReflectionService(
             repo=context.repo,
             llm=context.workflow.llm,
@@ -105,9 +143,12 @@ def main() -> None:
             lark=context.lark,
             adapter=context.reflection_adapter,
         )
-        reflection_id = service.generate_reflection(days=args.days, notify_lark=not args.no_lark)
+        reflection_id = service.generate_reflection(days=args.days, notify_lark=not args.no_lark, auto_apply=auto_apply)
         print(f"Hermes reflection draft generated: id={reflection_id}")
-        print("Status: draft; pending human approval before apply.")
+        if auto_apply:
+            print("Status: applied automatically; audit log written under memory/change_logs.")
+        else:
+            print("Status: draft; pending approval before apply.")
         return
 
     if args.command == "approve-reflection":
@@ -163,6 +204,23 @@ def _reflection_service(context) -> HermesReflectionService:
         lark=context.lark,
         adapter=context.reflection_adapter,
     )
+
+
+def _run_daily_reflection(context, settings: Settings, daily_run_id: int) -> None:
+    try:
+        reflection_id = _reflection_service(context).generate_reflection(
+            days=settings.daily_reflection_days,
+            notify_lark=True,
+            auto_apply=settings.hermes_reflection_auto_apply,
+        )
+    except Exception as exc:
+        warning = f"daily reflection failed after run_id={daily_run_id}: {exc}"
+        logger.warning(warning)
+        context.repo.record_run_warning(daily_run_id, warning)
+        return
+
+    mode = "auto-applied" if settings.hermes_reflection_auto_apply else "draft"
+    logger.info("Daily reflection completed after run_id=%s: reflection_id=%s mode=%s", daily_run_id, reflection_id, mode)
 
 
 def _load_env_file(path: Path) -> None:

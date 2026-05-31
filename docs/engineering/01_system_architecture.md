@@ -22,6 +22,15 @@ Python Orchestrator
   |       +--> hermes-agent（可选）
   |       +--> custom reflection fallback
   |
+  +--> Fast Read Pack Generator
+  |       +--> Book Source Collector（公开来源摘录）
+  |       +--> SQLite artifact metadata
+  |       +--> library/YYYY/MM/.../reading-pack.md
+  |
+  +--> Daily Recommendation Agent Adapter
+  |       +--> hermes-agent（可选）
+  |       +--> legacy direct model branch（可回滚）
+  |
   +--> OpenClaw Gateway / Skill Layer（后续）
   |
   v
@@ -71,6 +80,9 @@ SQLite 是 source of truth，保存不可丢失的原始事实：
 - 用户按钮反馈。
 - 原因反馈。
 - 自由文本。
+- 快速读完包元数据。
+- 书籍公开来源摘录和 reading pack 来源引用关系。
+- 长文本 artifact 路径和 hash。
 - 周期性复盘回答。
 - 结构化画像条目。
 - 运行日志。
@@ -96,7 +108,7 @@ Hermes 负责把事实解释成语义记忆。当前实现已经把这层抽象�
 - 每周生成用户画像复盘。
 - 提出 Skill 或推荐策略的改进建议。
 
-Hermes 不直接替代 SQLite。SQLite 保存事实，Reflection Agent 只生成可解释草稿；草稿必须经过人工 `approve-reflection` 和 `apply-reflection` 后，才会进入 `memory/USER.md` 与 `memory/MEMORY.md`。`run-daily` 只读取已应用 memory，绝不读取 draft reflection。
+Hermes 不直接替代 SQLite。SQLite 保存事实，Reflection Agent 只生成可解释草稿；草稿默认可经过 `approve-reflection` 和 `apply-reflection` 后进入 `memory/USER.md` 与 `memory/MEMORY.md`，也可以开启自动 apply。无论手动还是自动 apply，都必须写入 `memory/change_logs` 审计文件。`run-daily` 只读取已应用 memory，绝不读取 draft reflection。
 
 ### Python Orchestrator：可靠编排层
 
@@ -107,6 +119,9 @@ Python 后端负责确定性流程：
 - 调用国内模型 API。
 - 调用搜索 API。
 - 调用 Hermes 生成反思。
+- 可选调用 Hermes 生成每日推荐主题和书单。
+- 自动或手动生成快速读完包并沉淀 artifact。
+- 抓取推荐记录中已有的公开书籍来源链接，清洗后作为 reading pack 上下文。
 - 发送飞书消息。
 - 记录运行日志。
 - 控制 API 调用次数。
@@ -151,6 +166,9 @@ Skill 的更新应先由 Hermes 提出建议，再由用户确认后生效。
 - 7 天复盘，包含反馈分布、原因分布、画像置信度分层、可能误解、自由文本摘要和下周建议。
 - 日志、基础 metrics、systemd 试运行单元和备份脚本。
 - Hermes reflection adapter：支持 `custom` 默认实现和 `hermes-agent` CLI 适配器；外部 agent 失败时可回退到 custom reflection。
+- Hermes daily recommendation adapter：设置 `DAILY_RECOMMENDATION_PROVIDER=hermes-agent` 后，主题和书单生成通过 Hermes wrapper 执行，业务项目不再直连模型生成 daily 推荐。
+- 快速读完包 MVP：`run-daily` 默认对每条推荐生成 fast read pack，飞书卡片展示预览；也支持对已有 recommendation 手动执行 `generate-reading-pack`，生成 Markdown artifact，并把 `reading_packs` / `artifacts` 元数据写入 SQLite。
+- 轻量来源层：`BookSourceCollector` 会在生成阅读包前采集推荐 `source_url` 的公开网页摘录，写入 `book_sources`，并用 `reading_pack_sources` 记录阅读包实际引用的来源；失败时不阻断日推。
 - Telegram 推送和按钮反馈框架仍保留为兼容通道。
 
 当前暂不继续完善 Telegram。下一步是把飞书初版放到真实服务器试运行，并用真实反馈验证原因体系和画像更新规则：
@@ -173,6 +191,7 @@ profile.py 的规则总结 -> Reflection Agent 草稿 -> 人审应用
 硬编码 prompt -> Skill 文件
 SQLite 摘要 -> Hermes memory provider / context input
 多渠道接入 -> OpenClaw Gateway
+推荐理由 -> 快速读完包 -> 书库/业务页面复盘
 ```
 
 ## 4. 关键架构原则

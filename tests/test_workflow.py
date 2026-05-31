@@ -25,7 +25,7 @@ class DisabledLark:
     def enabled(self):
         return False
 
-    def send_recommendation(self, index, total, draft, links):
+    def send_recommendation(self, index, total, draft, links, reading_pack_preview=None):
         return None
 
     def send_text(self, text):
@@ -89,11 +89,13 @@ class CapturingLark:
     def __init__(self, summary_message_id=None):
         self.summary_message_id = summary_message_id
         self.summary_drafts = []
+        self.reading_pack_previews = []
 
     def enabled(self):
         return True
 
-    def send_recommendation(self, index, total, draft, links):
+    def send_recommendation(self, index, total, draft, links, reading_pack_preview=None):
+        self.reading_pack_previews.append(reading_pack_preview)
         return f"rec-{index}"
 
     def send_profile_test_summary(self, drafts):
@@ -201,6 +203,42 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(run["status"], "success")
             self.assertIsNone(run["warning_message"])
             self.assertEqual(len(lark.summary_drafts), 3)
+            conn.close()
+
+    def test_daily_run_auto_generates_reading_packs_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            lark = CapturingLark(summary_message_id="summary-id")
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=lark,
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                memory_dir=tmp_path / "memory",
+                reading_packs_enabled=True,
+                reading_pack_library_dir=tmp_path / "library",
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
+            pack_count = conn.execute("SELECT COUNT(*) AS count FROM reading_packs").fetchone()["count"]
+            artifact_count = conn.execute("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'reading_pack'").fetchone()["count"]
+            self.assertEqual(run["status"], "success")
+            self.assertEqual(pack_count, 3)
+            self.assertEqual(artifact_count, 3)
+            self.assertEqual(len(lark.reading_pack_previews), 3)
+            self.assertTrue(all(preview is not None for preview in lark.reading_pack_previews))
+            self.assertTrue(all(Path(preview.artifact_path).exists() for preview in lark.reading_pack_previews))
             conn.close()
 
     def test_daily_run_records_warning_when_lark_profile_test_summary_fails(self):

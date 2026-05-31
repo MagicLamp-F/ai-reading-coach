@@ -17,6 +17,14 @@ class HttpResponse:
     body: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class TextHttpResponse:
+    status: int
+    body: str
+    final_url: str
+    content_type: str
+
+
 class HttpClient:
     def __init__(self, timeout_seconds: float = 20, retries: int = 2):
         self.timeout_seconds = timeout_seconds
@@ -35,6 +43,49 @@ class HttpClient:
     def get_json(self, url: str) -> HttpResponse:
         req = urllib.request.Request(url, method="GET")
         return self._request(req)
+
+    def get_text(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        max_bytes: int = 200_000,
+    ) -> TextHttpResponse:
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"User-Agent": "ai-reading-coach/0.1 source-collector", **(headers or {})},
+        )
+        last_error: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+                    raw = resp.read(max_bytes + 1)
+                    content_type = resp.headers.get("Content-Type", "")
+                    charset = resp.headers.get_content_charset() or "utf-8"
+                    return TextHttpResponse(
+                        status=resp.status,
+                        body=raw[:max_bytes].decode(charset, errors="replace"),
+                        final_url=resp.geturl(),
+                        content_type=content_type,
+                    )
+            except urllib.error.HTTPError as exc:
+                if 400 <= exc.code < 500:
+                    raw = exc.read(max_bytes).decode("utf-8", errors="replace")
+                    return TextHttpResponse(
+                        status=exc.code,
+                        body=raw,
+                        final_url=exc.geturl(),
+                        content_type=exc.headers.get("Content-Type", ""),
+                    )
+                last_error = exc
+            except (urllib.error.URLError, TimeoutError, UnicodeDecodeError) as exc:
+                last_error = exc
+
+            if attempt < self.retries:
+                time.sleep(0.6 * (attempt + 1))
+
+        logger.warning("HTTP text request failed after retries: %s", last_error)
+        raise RuntimeError(f"HTTP text request failed: {last_error}")
 
     def _request(self, req: urllib.request.Request) -> HttpResponse:
         last_error: Exception | None = None
@@ -60,4 +111,3 @@ class HttpClient:
 
         logger.warning("HTTP request failed after retries: %s", last_error)
         raise RuntimeError(f"HTTP request failed: {last_error}")
-

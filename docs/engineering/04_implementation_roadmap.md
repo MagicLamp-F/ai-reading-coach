@@ -2,7 +2,7 @@
 
 ## 当前状态快照
 
-截至 2026-05-29，项目已经从早期 Telegram MVP 推进到“飞书优先 MVP + hermes-agent 接入边界”的试运行准备状态：
+截至 2026-05-31，项目已经从早期 Telegram MVP 推进到“飞书优先 MVP + hermes-agent 接入边界 + 快速读完包 MVP”的试运行准备状态：
 
 - 阶段 0 基本完成：项目包含 Docker、systemd service/timer、备份脚本和服务器 Runbook。
 - 阶段 1 完成：SQLite、用户说明书导入、每日推荐、反馈回写画像、7 天复盘和基础测试已具备。
@@ -10,7 +10,8 @@
 - 阶段 3 完成初版：推荐记录和飞书卡片已包含 `system_hypothesis` 与 `profile_dimensions`。
 - 阶段 4 部分完成：`reason_code`、原因选择页、自由文本补充和部分画像更新规则已实现；仍需用真实 7 天反馈验证原因体系是否足够。
 - 阶段 7 已完成接入边界初版：新增 reflection agent adapter，`hermes-agent` 已安装到 `/home/ubuntu/projects/hermes-agent`，通过外部 `reflect-json` wrapper 接入；当前 custom reflection 保留为 fallback，仍需用 7 天数据验证输出质量。
-- 阶段 8 以后尚未开始：OpenClaw、Skill 化和 30 天报告仍是后续方向。
+- 阶段 7.5 已完成快速读完包自动飞书初版，并补入轻量来源层：`run-daily` 可自动生成 `reading.fast_read_pack` artifact，SQLite 保存结构化元数据，飞书推荐卡片展示快速读完预览；生成前会尝试采集推荐 `source_url` 的公开网页摘录，写入 `book_sources` 并传给 Hermes。
+- 阶段 8 以后尚未开始：OpenClaw、Skill 化、业务页面和 30 天报告仍是后续方向。
 
 ## 阶段 0：基础设施准备
 
@@ -202,6 +203,34 @@ Ubuntu 24.04 LTS
 - `USER.md` / `MEMORY.md` 只在人工 approve/apply 后版本化更新。
 - hermes-agent 不存在或失败时，会 fallback 到 custom reflection，不影响 `run-daily`。
 - draft reflection 不进入每日推荐上下文。
+
+## 阶段 7.5：快速读完包 MVP
+
+目标：让每日推荐不只说明“为什么推荐”，还沉淀“这本书大概在说什么、怎么快速过一遍、哪些内容和用户有关”。
+
+状态：自动飞书初版完成。
+
+已完成：
+
+- 新增 `artifacts` 表保存长文本产物路径、hash 和元数据。
+- 新增 `reading_packs` 表保存快速读完包结构化内容、状态、route 和 schema version。
+- 新增 `book_sources` / `reading_pack_sources`，保存公开来源摘录并记录 reading pack 使用了哪些来源。
+- 新增 `app/reading_pack.py`，支持 `reading.fast_read_pack` 生成、fallback 和 Markdown 渲染。
+- 新增 `app/source_collector.py`，从推荐记录里的公开 `source_url` 抓取网页、清洗 HTML、截取摘要并入库；失败不影响日推。
+- 新增 CLI：`python3 -m app.cli generate-reading-pack --recommendation-id <id>`。
+- 长文本保存到 `library/YYYY/MM/YYYY-MM-DD__book-title/reading-pack.md`。
+- `run-daily` 默认对每条推荐自动生成 reading pack，并把一句话主张、10 分钟路径、核心脉络和 artifact 路径放入飞书卡片。
+- 可用 `DAILY_READING_PACKS_ENABLED=false` 回滚到不自动生成。
+- 生成失败只记录 run warning，继续发送原推荐，不影响反馈和 reflection 人审链路。
+
+验收：
+
+- 对已有 recommendation id 可生成 reading pack。
+- 每日推荐可自动附带 fast read preview。
+- SQLite 能查询 pack 与 artifact 元数据。
+- 模型失败时可生成 fallback 包，不影响日推。
+- 来源抓取失败时不影响日推；来源成功时，Hermes prompt 包含公开摘录。
+- 后续业务页面可基于 `reading_packs` / `artifacts` 做列表和详情页。
 
 ## 阶段 8：沉淀 Skill 与接入 OpenClaw
 

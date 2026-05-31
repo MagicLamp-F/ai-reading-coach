@@ -364,6 +364,20 @@ Hermes 负责筛选：
 
 目标不是盗版复刻一本书，而是帮助用户判断是否值得读、怎么读、先读什么、从中吸收什么。
 
+当前 MVP 已先落地为自动 `reading.fast_read_pack` 链路：
+
+```text
+recommendation_id
+  -> ai-reading-coach 读取推荐、书籍、画像和 Hermes memory 上下文
+  -> 生成 fast_read_pack_v1
+  -> 写入 reading_packs
+  -> 写入 artifacts
+  -> 保存 library/YYYY/MM/YYYY-MM-DD__book-title/reading-pack.md
+  -> 飞书推荐卡片展示快速读完预览
+```
+
+这一步暂时不要求 Hermes fast-read route 化。目的是先把“内容产物、可维护数据结构、自动触达”跑通，再决定是否加业务页面和 Hermes route adapter。
+
 ## 11. 飞书闭环
 
 飞书是第一交互通道，负责低摩擦触达和反馈。

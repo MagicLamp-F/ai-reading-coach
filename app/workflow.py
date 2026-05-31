@@ -8,12 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from app.feedback import FEEDBACK_LABELS, FEEDBACK_REASON_LABELS, FEEDBACK_TYPES, build_feedback_url
+from app.daily_agent_adapter import DailyRecommendationAgentAdapter
 from app.lark import LarkFeedbackLink, LarkRobotClient
 from app.llm import OpenAIChatClient
 from app.memory import DEFAULT_LONG_TERM_MEMORY_MAX_CHARS, load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
+from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview
 from app.repository import RecommendationDraft, Repository
 from app.search import SearchResult, TavilySearch
+from app.source_collector import BookSourceCollector
 from app.telegram import feedback_markup, format_recommendation_message, TelegramClient
 
 logger = logging.getLogger(__name__)
@@ -88,6 +91,11 @@ class ReadingCoachWorkflow:
         max_model_calls: int,
         memory_dir: Path = Path("memory"),
         max_memory_chars: int = DEFAULT_LONG_TERM_MEMORY_MAX_CHARS,
+        reading_packs_enabled: bool = False,
+        reading_pack_library_dir: Path = Path("library"),
+        daily_recommendation_agent: DailyRecommendationAgentAdapter | None = None,
+        reading_pack_agent: HermesReadingPackAdapter | None = None,
+        source_collector: BookSourceCollector | None = None,
     ):
         self.repo = repo
         self.search = search
@@ -101,6 +109,11 @@ class ReadingCoachWorkflow:
         self.max_model_calls = max_model_calls
         self.memory_dir = memory_dir
         self.max_memory_chars = max_memory_chars
+        self.reading_packs_enabled = reading_packs_enabled
+        self.reading_pack_library_dir = reading_pack_library_dir
+        self.daily_recommendation_agent = daily_recommendation_agent
+        self.reading_pack_agent = reading_pack_agent
+        self.source_collector = source_collector
 
     def run_daily_recommendations(self) -> int:
         run_id = self.repo.create_run("daily_recommendation", {"channel": self.channel})
@@ -112,7 +125,7 @@ class ReadingCoachWorkflow:
                 long_term_memory_context=load_long_term_memory_context(self.memory_dir, self.max_memory_chars),
             )
             themes = self._generate_themes(profile_context)
-            if self.llm.api_key:
+            if self.daily_recommendation_agent is None and self.llm.api_key:
                 api_calls += 1
                 self.repo.record_cost(run_id, "model", "generate_themes", 1, {"model": self.llm.model})
 
@@ -131,7 +144,7 @@ class ReadingCoachWorkflow:
                     self.repo.record_cost(run_id, "tavily", "search_books", 1, {"theme": theme})
 
             drafts = self._generate_recommendations(profile_context, themes, search_results)
-            if self.llm.api_key:
+            if self.daily_recommendation_agent is None and self.llm.api_key:
                 api_calls += 1
                 self.repo.record_cost(run_id, "model", "generate_recommendations", 1, {"model": self.llm.model})
 
@@ -140,7 +153,8 @@ class ReadingCoachWorkflow:
             sent_drafts: list[RecommendationDraft] = []
             for index, draft in enumerate(drafts[:3], start=1):
                 recommendation_id = self.repo.add_recommendation(run_id, draft, today)
-                message_id = self._send_recommendation(index, total, recommendation_id, draft)
+                reading_pack_preview = self._generate_reading_pack_preview(run_id, recommendation_id)
+                message_id = self._send_recommendation(index, total, recommendation_id, draft, reading_pack_preview)
                 if message_id is None and self._recommendation_channel_enabled():
                     raise RuntimeError(f"recommendation send failed: recommendation_id={recommendation_id}")
                 if message_id:
@@ -254,7 +268,14 @@ class ReadingCoachWorkflow:
             self.repo.finish_run(run_id, "failed", error_message=str(exc))
             raise
 
-    def _send_recommendation(self, index: int, total: int, recommendation_id: int, draft: RecommendationDraft) -> str | None:
+    def _send_recommendation(
+        self,
+        index: int,
+        total: int,
+        recommendation_id: int,
+        draft: RecommendationDraft,
+        reading_pack_preview: ReadingPackPreview | None = None,
+    ) -> str | None:
         if self.channel == "telegram":
             message = format_recommendation_message(index, total, draft)
             return self.telegram.send_message(message, feedback_markup(recommendation_id))
@@ -265,7 +286,27 @@ class ReadingCoachWorkflow:
             )
             for feedback_type in FEEDBACK_TYPES
         ]
-        return self.lark.send_recommendation(index, total, draft, links)
+        return self.lark.send_recommendation(index, total, draft, links, reading_pack_preview)
+
+    def _generate_reading_pack_preview(self, run_id: int, recommendation_id: int) -> ReadingPackPreview | None:
+        if not self.reading_packs_enabled:
+            return None
+        try:
+            result = FastReadPackService(
+                repo=self.repo,
+                llm=self.llm,
+                memory_dir=self.memory_dir,
+                library_dir=self.reading_pack_library_dir,
+                max_memory_chars=self.max_memory_chars,
+                agent=self.reading_pack_agent,
+                source_collector=self.source_collector,
+            ).generate_for_recommendation(recommendation_id)
+            return result.preview
+        except Exception as exc:
+            warning = f"reading pack generation failed: recommendation_id={recommendation_id}: {exc}"
+            logger.warning(warning)
+            self.repo.record_run_warning(run_id, warning)
+            return None
 
     def _send_text(self, text: str) -> str | None:
         if self.channel == "telegram":
@@ -298,6 +339,12 @@ class ReadingCoachWorkflow:
             self.repo.record_run_warning(run_id, warning)
 
     def _generate_themes(self, profile_context: str) -> list[str]:
+        if self.daily_recommendation_agent is not None:
+            try:
+                return self.daily_recommendation_agent.generate_themes(profile_context)
+            except Exception:
+                logger.exception("Hermes daily theme generation failed; using default themes")
+                return DEFAULT_THEMES
         try:
             response = self.llm.complete_json(
                 "你是读书推荐系统的画像决策层。只输出 JSON。",
@@ -323,6 +370,16 @@ class ReadingCoachWorkflow:
         themes: list[str],
         search_results: list[SearchResult],
     ) -> list[RecommendationDraft]:
+        if self.daily_recommendation_agent is not None:
+            try:
+                books = self.daily_recommendation_agent.generate_recommendations(profile_context, themes, search_results)
+                drafts = [self._draft_from_dict(item) for item in books[:3] if isinstance(item, dict)]
+                if drafts:
+                    return drafts
+            except Exception:
+                logger.exception("Hermes daily recommendation generation failed; using fallback books")
+            return [self._draft_from_dict(item) for item in FALLBACK_BOOKS]
+
         search_context = "\n".join(
             f"- {result.title}\n  {result.url}\n  {result.content[:300]}"
             for result in search_results[:12]

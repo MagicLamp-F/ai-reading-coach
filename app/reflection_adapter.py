@@ -84,6 +84,11 @@ class HermesAgentCliAdapter:
 
         payload = {
             "task": "ai_reading_coach.reflection",
+            "route": "reading.reflection.generate",
+            "domain": "reading",
+            "memory_scope": ["user_profile", "reading_profile", "book_history"],
+            "tool_policy": "none",
+            "output_schema": "reflection_v1",
             "format": "json",
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,

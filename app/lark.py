@@ -73,7 +73,14 @@ class LarkRobotClient:
         )
         return self._send(payload)
 
-    def send_recommendation(self, index: int, total: int, draft, feedback_links: list[LarkFeedbackLink]) -> str | None:
+    def send_recommendation(
+        self,
+        index: int,
+        total: int,
+        draft,
+        feedback_links: list[LarkFeedbackLink],
+        reading_pack_preview=None,
+    ) -> str | None:
         dimensions = "、".join(draft.profile_dimensions) if draft.profile_dimensions else "未标注"
         elements = [
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**{draft.title}**\n作者：{draft.author or '未知作者'}\n主题：{draft.theme}"}},
@@ -85,6 +92,8 @@ class LarkRobotClient:
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**可能不适合的原因**：{draft.risk}"}},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**建议读法**：{draft.reading_suggestion}"}},
         ]
+        if reading_pack_preview is not None:
+            elements.extend(_reading_pack_elements(reading_pack_preview))
         if draft.source_url:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"[来源链接]({draft.source_url})"}})
         elements.append(
@@ -169,3 +178,40 @@ def _unique_dimensions(drafts: list) -> list[str]:
                 seen.add(dimension)
                 dimensions.append(dimension)
     return dimensions
+
+
+def _reading_pack_elements(reading_pack_preview) -> list[dict]:
+    core_points = getattr(reading_pack_preview, "core_points", ()) or ()
+    core_text = "\n".join(f"- {point}" for point in core_points if str(point).strip())
+    concepts = getattr(reading_pack_preview, "concepts", ()) or ()
+    concept_text = "、".join(str(item) for item in concepts if str(item).strip())
+    chapter_items = getattr(reading_pack_preview, "chapter_items", ()) or ()
+    chapter_text = "\n".join(f"- {item}" for item in chapter_items if str(item).strip())
+    examples = getattr(reading_pack_preview, "examples", ()) or ()
+    example_text = "\n".join(f"- {item}" for item in examples if str(item).strip())
+    limitations = getattr(reading_pack_preview, "limitations", ()) or ()
+    limitation_text = "\n".join(f"- {item}" for item in limitations if str(item).strip())
+    artifact_path = str(getattr(reading_pack_preview, "artifact_path", "") or "")
+    status = str(getattr(reading_pack_preview, "status", "") or "")
+    lines = [
+        "**快速读完包**",
+        f"一句话：{getattr(reading_pack_preview, 'summary', '')}",
+        f"10 分钟路径：{getattr(reading_pack_preview, 'ten_min_route', '')}",
+    ]
+    if concept_text:
+        lines.append(f"核心概念：{concept_text}")
+    if core_text:
+        lines.append(f"核心脉络：\n{core_text}")
+    if chapter_text:
+        lines.append(f"章节/结构地图：\n{chapter_text}")
+    if example_text:
+        lines.append(f"例子/案例：\n{example_text}")
+    if limitation_text:
+        lines.append(f"局限：\n{limitation_text}")
+    if artifact_path:
+        suffix = f"（{status}）" if status else ""
+        lines.append(f"机器归档：`{artifact_path}`{suffix}")
+    return [
+        {"tag": "hr"},
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+    ]

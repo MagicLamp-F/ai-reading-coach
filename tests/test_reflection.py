@@ -245,17 +245,47 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(approved["status"], "approved")
         self.assertIsNotNone(approved["approved_at"])
 
-        service.apply_reflection(reflection_id)
+        audit_path = service.apply_reflection(reflection_id)
 
         applied = self.repo.get_reflection(reflection_id)
         self.assertEqual(applied["status"], "applied")
         self.assertIsNotNone(applied["applied_at"])
+        self.assertTrue(audit_path.exists())
+        self.assertIn("Mode: manual", audit_path.read_text(encoding="utf-8"))
         user_md = (self.memory_dir / "USER.md").read_text(encoding="utf-8")
         memory_md = (self.memory_dir / "MEMORY.md").read_text(encoding="utf-8")
         self.assertIn(f"Reflection {reflection_id} Applied", user_md)
         self.assertIn("用户偏好工程实践", user_md)
         self.assertIn(f"Reflection {reflection_id} Applied", memory_md)
         self.assertIn("下周减少营销类内容", memory_md)
+
+    def test_generate_reflection_auto_apply_writes_memory_and_change_log(self):
+        lark = CapturingLark()
+        service = HermesReflectionService(
+            self.repo,
+            FakeLLM(),
+            weekly_report_builder=lambda: "weekly report",
+            lark=lark,
+            memory_dir=self.memory_dir,
+        )
+
+        reflection_id = service.generate_reflection(days=7, notify_lark=True, auto_apply=True)
+
+        row = self.repo.get_reflection(reflection_id)
+        self.assertEqual(row["status"], "applied")
+        user_md = (self.memory_dir / "USER.md").read_text(encoding="utf-8")
+        memory_md = (self.memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("用户偏好工程实践", user_md)
+        self.assertIn("下周减少营销类内容", memory_md)
+        change_logs = list((self.memory_dir / "change_logs").glob(f"*_reflection_{reflection_id}_auto.md"))
+        self.assertEqual(len(change_logs), 1)
+        audit = change_logs[0].read_text(encoding="utf-8")
+        self.assertIn("Mode: auto", audit)
+        self.assertIn("USER.md Patch", audit)
+        self.assertIn("MEMORY.md Patch", audit)
+        self.assertEqual(len(lark.texts), 1)
+        self.assertIn("已自动应用", lark.texts[0])
+        self.assertNotIn("待人工确认", lark.texts[0])
 
     def test_llm_failure_records_failed_run_without_reflection(self):
         service = HermesReflectionService(

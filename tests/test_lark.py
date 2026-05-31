@@ -4,6 +4,7 @@ import hmac
 import unittest
 
 from app.http_client import HttpResponse
+from app.reading_pack import ReadingPackPreview
 from app.repository import RecommendationDraft
 from app.lark import LarkRobotClient, generate_lark_sign
 
@@ -130,6 +131,56 @@ class LarkTests(unittest.TestCase):
         self.assertIn("3. 假设 3", rendered)
         self.assertIn("knowledge_gap、system_reliability、reading_preference", rendered)
         self.assertIn("帮助系统验证这些假设", rendered)
+
+    def test_recommendation_card_can_include_reading_pack_preview(self):
+        http = CapturingHttp()
+        client = LarkRobotClient(webhook_url="https://example.test/webhook", webhook_secret="", http=http)
+        draft = RecommendationDraft(
+            title="Test Book",
+            author="A",
+            source_url="",
+            slot_type="profile_fit",
+            theme="软件工程实践",
+            recommendation_reason="推荐理由",
+            profile_mapping="画像映射",
+            system_hypothesis="测试假设",
+            profile_dimensions=["knowledge_gap"],
+            expected_benefit="可能收益",
+            risk="篇幅较长",
+            reading_suggestion="建议读法",
+            metadata={},
+        )
+
+        client.send_recommendation(
+            1,
+            1,
+            draft,
+            [type("Link", (), {"feedback_type": "like", "url": "https://example.test/fb/like"})],
+            ReadingPackPreview(
+                summary="这本书讲如何搭建可靠系统。",
+                ten_min_route="先读核心论点和章节地图。",
+                core_points=("先明确问题", "再形成反馈闭环"),
+                concepts=("可靠性", "反馈闭环"),
+                chapter_items=("第一部分：问题", "第二部分：方法"),
+                examples=("用运行日志定位问题",),
+                limitations=("需要人工校验公开来源",),
+                artifact_path="library/2026/05/test/reading-pack.md",
+                status="fallback",
+            ),
+        )
+
+        rendered = "\n".join(
+            element["text"]["content"]
+            for element in http.payload["card"]["elements"]
+            if element.get("tag") == "div"
+        )
+        self.assertIn("快速读完包", rendered)
+        self.assertIn("这本书讲如何搭建可靠系统", rendered)
+        self.assertIn("先读核心论点和章节地图", rendered)
+        self.assertIn("核心概念", rendered)
+        self.assertIn("章节/结构地图", rendered)
+        self.assertIn("例子/案例", rendered)
+        self.assertIn("library/2026/05/test/reading-pack.md", rendered)
 
     def test_send_retries_lark_frequency_limit_then_succeeds(self):
         sleeps = []
