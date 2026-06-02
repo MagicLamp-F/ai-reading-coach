@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from app.db import connect, init_db
-from app.repository import Repository
+from app.repository import BookSourceDraft, Repository
 from app.workflow import FALLBACK_BOOKS
 from app.workflow import ReadingCoachWorkflow
 
@@ -85,11 +85,71 @@ class PromptCapturingLLM:
         }
 
 
+class CandidateLLM:
+    api_key = "test-key"
+    model = "test-model"
+
+    def complete_json(self, system_prompt, user_prompt):
+        if '"themes"' in user_prompt:
+            return {"themes": ["商业化", "软件设计", "知识管理"]}
+        return {
+            "books": [
+                {
+                    "title": f"Candidate {index}",
+                    "author": "Author",
+                    "source_url": "",
+                    "slot_type": "profile_fit",
+                    "theme": "商业化",
+                    "recommendation_reason": "reason",
+                    "profile_mapping": "mapping",
+                    "system_hypothesis": "hypothesis",
+                    "profile_dimensions": ["business_strategy"],
+                    "expected_benefit": "benefit",
+                    "risk": "risk",
+                    "reading_suggestion": "suggestion",
+                    "user_fit_score": 0.8,
+                    "candidate_reason": f"candidate reason {index}",
+                }
+                for index in range(1, 5)
+            ]
+        }
+
+
+class SourceAwareCollector:
+    def __init__(self, repo, rich_titles):
+        self.repo = repo
+        self.rich_titles = set(rich_titles)
+
+    def collect_for_book(self, book_id, title, author="", source_url=""):
+        if title not in self.rich_titles:
+            return []
+        for index in range(3):
+            self.repo.upsert_book_source(
+                BookSourceDraft(
+                    book_id=book_id,
+                    source_type="review" if index < 2 else "public_page",
+                    url=f"https://example.test/{title}/{index}",
+                    title=f"{title} source {index}",
+                    text_excerpt="source text " * 700,
+                    metadata={"source": "test"},
+                )
+            )
+        return []
+
+
+class ExplodingReadingPackAgent:
+    name = "exploding-reading-pack-agent"
+
+    def generate_pack(self, prompt_context):
+        raise RuntimeError("reading pack unavailable")
+
+
 class CapturingLark:
     def __init__(self, summary_message_id=None):
         self.summary_message_id = summary_message_id
         self.summary_drafts = []
         self.reading_pack_previews = []
+        self.sent_reading_pack_previews = []
 
     def enabled(self):
         return True
@@ -102,8 +162,35 @@ class CapturingLark:
         self.summary_drafts = list(drafts)
         return self.summary_message_id
 
+    def send_reading_pack_preview(self, reading_pack_preview):
+        self.sent_reading_pack_previews.append(reading_pack_preview)
+        return f"pack-{len(self.sent_reading_pack_previews)}"
+
     def send_text(self, text):
         return "text-id"
+
+
+class FailingRecommendationLark(CapturingLark):
+    last_send_error = ""
+
+    def send_recommendation(self, index, total, draft, links, reading_pack_preview=None):
+        self.reading_pack_previews.append(reading_pack_preview)
+        self.last_send_error = "status=200 code=11232 msg=frequency limited"
+        return None
+
+
+class RecoveringRecommendationLark(FailingRecommendationLark):
+    def __init__(self):
+        super().__init__()
+        self.fail = True
+
+    def send_recommendation(self, index, total, draft, links, reading_pack_preview=None):
+        self.reading_pack_previews.append(reading_pack_preview)
+        if self.fail:
+            self.last_send_error = "status=200 code=11232 msg=frequency limited"
+            return None
+        self.last_send_error = ""
+        return f"resent-{index}"
 
 
 class ExplodingSummaryLark(CapturingLark):
@@ -178,6 +265,102 @@ class WorkflowTests(unittest.TestCase):
             )
             conn.close()
 
+    def test_daily_run_can_send_one_recommendation_by_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            lark = CapturingLark(summary_message_id="summary-id")
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=lark,
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                daily_recommendation_count=1,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
+            recommendation_count = conn.execute("SELECT COUNT(*) AS count FROM recommendations WHERE run_id = ?", (run_id,)).fetchone()["count"]
+            self.assertEqual(run["status"], "success")
+            self.assertEqual(recommendation_count, 1)
+            self.assertEqual(len(lark.reading_pack_previews), 1)
+            self.assertIsNone(lark.reading_pack_previews[0])
+            self.assertEqual(lark.summary_drafts, [])
+            conn.close()
+
+    def test_daily_run_queues_lark_recommendation_delivery_failure_without_failing_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            lark = FailingRecommendationLark()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=lark,
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                daily_recommendation_count=1,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
+            recommendation = conn.execute("SELECT * FROM recommendations WHERE run_id = ?", (run_id,)).fetchone()
+            outbox = conn.execute("SELECT * FROM delivery_outbox WHERE recommendation_id = ?", (recommendation["id"],)).fetchone()
+            self.assertEqual(run["status"], "success")
+            self.assertIn("recommendation delivery queued", run["warning_message"])
+            self.assertIsNone(recommendation["message_id"])
+            self.assertEqual(outbox["status"], "pending")
+            self.assertEqual(outbox["message_type"], "recommendation")
+            self.assertIn("11232", outbox["last_error"])
+            conn.close()
+
+    def test_resend_pending_deliveries_sends_queued_recommendation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            lark = RecoveringRecommendationLark()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=lark,
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                daily_recommendation_count=1,
+            )
+            run_id = workflow.run_daily_recommendations()
+            conn.execute("UPDATE delivery_outbox SET next_attempt_at = CURRENT_TIMESTAMP")
+            lark.fail = False
+
+            sent = workflow.resend_pending_deliveries()
+
+            recommendation = conn.execute("SELECT * FROM recommendations WHERE run_id = ?", (run_id,)).fetchone()
+            outbox = conn.execute("SELECT * FROM delivery_outbox WHERE recommendation_id = ?", (recommendation["id"],)).fetchone()
+            self.assertEqual(sent, 1)
+            self.assertEqual(recommendation["message_id"], "resent-1")
+            self.assertEqual(outbox["status"], "sent")
+            conn.close()
+
     def test_daily_run_treats_empty_lark_profile_summary_message_id_as_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "test.db")
@@ -238,7 +421,100 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(artifact_count, 3)
             self.assertEqual(len(lark.reading_pack_previews), 3)
             self.assertTrue(all(preview is not None for preview in lark.reading_pack_previews))
-            self.assertTrue(all(Path(preview.artifact_path).exists() for preview in lark.reading_pack_previews))
+            self.assertEqual(len(lark.sent_reading_pack_previews), 0)
+            artifact_paths = [
+                row["path"]
+                for row in conn.execute("SELECT path FROM artifacts WHERE artifact_type = 'reading_pack'")
+            ]
+            self.assertTrue(all(Path(path).exists() for path in artifact_paths))
+            conn.close()
+
+    def test_daily_run_sends_recommendation_even_when_reading_pack_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            lark = CapturingLark(summary_message_id="summary-id")
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=lark,
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                daily_recommendation_count=1,
+                memory_dir=tmp_path / "memory",
+                reading_packs_enabled=True,
+                reading_pack_library_dir=tmp_path / "library",
+                reading_pack_agent=ExplodingReadingPackAgent(),
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
+            recommendation = conn.execute("SELECT * FROM recommendations WHERE run_id = ?", (run_id,)).fetchone()
+            pack = conn.execute("SELECT * FROM reading_packs WHERE recommendation_id = ?", (recommendation["id"],)).fetchone()
+            self.assertEqual(run["status"], "success")
+            self.assertEqual(recommendation["message_id"], "rec-1")
+            self.assertEqual(len(lark.reading_pack_previews), 1)
+            self.assertIsNotNone(lark.reading_pack_previews[0])
+            self.assertEqual(len(lark.sent_reading_pack_previews), 0)
+            self.assertEqual(pack["status"], "fallback")
+            self.assertIn("reading pack unavailable", pack["error_message"])
+            conn.close()
+
+    def test_daily_run_source_aware_selects_only_source_qualified_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=CandidateLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                source_collector=SourceAwareCollector(repo, {"Candidate 1", "Candidate 3"}),
+                source_aware_recommendations=True,
+                source_aware_candidate_count=4,
+                source_min_coverage_score=0.5,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            selected_titles = [
+                row["title"]
+                for row in conn.execute(
+                    """
+                    SELECT b.title
+                    FROM recommendations r
+                    JOIN books b ON b.id = r.book_id
+                    WHERE r.run_id = ?
+                    ORDER BY r.id
+                    """,
+                    (run_id,),
+                )
+            ]
+            candidate_rows = repo.list_recommendation_candidates(run_id)
+            selected_candidates = [row for row in candidate_rows if row["status"] == "selected"]
+            rejected_candidates = [row for row in candidate_rows if row["status"] == "rejected"]
+            run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
+
+            self.assertEqual(set(selected_titles), {"Candidate 1", "Candidate 3"})
+            self.assertEqual(len(selected_candidates), 2)
+            self.assertEqual(len(rejected_candidates), 2)
+            self.assertIn("selected fewer than 3", run["warning_message"])
             conn.close()
 
     def test_daily_run_records_warning_when_lark_profile_test_summary_fails(self):

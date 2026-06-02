@@ -27,8 +27,11 @@
 11. [当前进展总结](./10_current_progress_summary.md)：当前已完成能力、待验证事项和下一步工作。
 12. [hermes-agent 接入设计](./11_hermes_agent_integration_design.md)：Reflection Agent Adapter、hermes-agent CLI 接入、fallback、人审和回滚边界。
 13. [Hermes 记忆 Agent 与阅读中台设计](./12_hermes_memory_agent_platform.md)：整理 Hermes 主 Agent、wrapper、MCP/ACP、OpenClaw、飞书闭环、快速读完包、数据库与文件沉淀的长期架构。
-14. [快速读完包设计](./14_fast_read_pack_design.md)：说明 `reading.fast_read_pack` 的数据模型、artifact 保存、飞书预览、失败降级和验收标准。
 14. [Hermes 基础架构与接入状态](./13_hermes_foundation_architecture_status.md)：当前 Hermes wrapper、模型配置、验证结果、失败边界和下一步路线。
+15. [快速读完包设计](./14_fast_read_pack_design.md)：说明阅读包的数据模型、artifact 保存、飞书预览、失败降级和验收标准；当前实现已升级到 `reading.deep_read_pack` / `deep_read_pack_v2`。
+16. [当前已有能力与待做方案总览](./15_current_scope_and_next_plan.md)：用一份总览说明已经完成什么、还要验证什么、下一阶段该做什么，以及 OpenClaw 的位置。
+17. [模型成本分流与投递可靠性](./16_model_cost_routing_and_delivery_reliability.md)：记录 Hermes/Codex/Antigravity/Gemini/OpenClaw 的分层使用方案、分步骤接入计划，以及 2026-06-02 飞书 daily 未送达的限流原因和修复方向。
+18. [2026-06-02 Hermes / ARC / Feishu 总结](./development_history/2026-06-02_hermes_arc_delivery_and_reading_ui_summary.md)：总结 Hermes 默认生成、长快读包、ARC 阅读页、飞书投递可靠性、移动端阅读体验修复、验证结果和 GitHub 认证恢复步骤。
 
 探索文档：
 

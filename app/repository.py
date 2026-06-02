@@ -49,6 +49,34 @@ class BookSourceDraft:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class RecommendationCandidateDraft:
+    run_id: int
+    book_id: int
+    title: str
+    author: str
+    source_url: str
+    source_provider: str
+    candidate_reason: str
+    user_fit_score: float
+    source_coverage_score: float
+    final_score: float
+    source_status: str
+    status: str
+    reject_reason: str
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DeliveryOutboxDraft:
+    channel: str
+    message_type: str
+    recommendation_id: int | None
+    metadata: dict[str, Any]
+    last_error: str = ""
+    next_attempt_seconds: int = 0
+
+
 class Repository:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -141,6 +169,113 @@ class Repository:
             (message_id, recommendation_id),
         )
 
+    def enqueue_delivery(self, draft: DeliveryOutboxDraft) -> int:
+        existing = self.conn.execute(
+            """
+            SELECT id
+            FROM delivery_outbox
+            WHERE channel = ?
+                AND message_type = ?
+                AND COALESCE(recommendation_id, 0) = COALESCE(?, 0)
+                AND status = 'pending'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (draft.channel, draft.message_type, draft.recommendation_id),
+        ).fetchone()
+        if existing is not None:
+            self.conn.execute(
+                """
+                UPDATE delivery_outbox
+                SET last_error = ?,
+                    metadata_json = ?,
+                    next_attempt_at = datetime('now', ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    draft.last_error,
+                    json.dumps(draft.metadata, ensure_ascii=False),
+                    f"+{max(0, draft.next_attempt_seconds)} seconds",
+                    int(existing["id"]),
+                ),
+            )
+            return int(existing["id"])
+
+        cur = self.conn.execute(
+            """
+            INSERT INTO delivery_outbox(
+                channel,
+                message_type,
+                recommendation_id,
+                last_error,
+                metadata_json,
+                next_attempt_at
+            )
+            VALUES (?, ?, ?, ?, ?, datetime('now', ?))
+            """,
+            (
+                draft.channel,
+                draft.message_type,
+                draft.recommendation_id,
+                draft.last_error,
+                json.dumps(draft.metadata, ensure_ascii=False),
+                f"+{max(0, draft.next_attempt_seconds)} seconds",
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def pending_deliveries(self, limit: int = 20) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT *
+                FROM delivery_outbox
+                WHERE status = 'pending'
+                    AND next_attempt_at <= CURRENT_TIMESTAMP
+                ORDER BY next_attempt_at ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+
+    def mark_delivery_sent(self, delivery_id: int) -> None:
+        self.conn.execute(
+            """
+            UPDATE delivery_outbox
+            SET status = 'sent',
+                sent_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (delivery_id,),
+        )
+
+    def mark_delivery_retry(
+        self,
+        delivery_id: int,
+        last_error: str,
+        next_attempt_seconds: int,
+        max_attempts: int,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE delivery_outbox
+            SET attempt_count = attempt_count + 1,
+                status = CASE WHEN attempt_count + 1 >= ? THEN 'failed' ELSE 'pending' END,
+                last_error = ?,
+                next_attempt_at = datetime('now', ?),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                max(1, max_attempts),
+                last_error,
+                f"+{max(0, next_attempt_seconds)} seconds",
+                delivery_id,
+            ),
+        )
 
     def recommendation_exists(self, recommendation_id: int) -> bool:
         row = self.conn.execute(
@@ -478,6 +613,59 @@ class Repository:
             )
         )
 
+    def add_recommendation_candidate(self, draft: RecommendationCandidateDraft) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO recommendation_candidates(
+                run_id,
+                book_id,
+                title,
+                author,
+                source_url,
+                source_provider,
+                candidate_reason,
+                user_fit_score,
+                source_coverage_score,
+                final_score,
+                source_status,
+                status,
+                reject_reason,
+                metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.run_id,
+                draft.book_id,
+                draft.title,
+                draft.author,
+                draft.source_url,
+                draft.source_provider,
+                draft.candidate_reason,
+                draft.user_fit_score,
+                draft.source_coverage_score,
+                draft.final_score,
+                draft.source_status,
+                draft.status,
+                draft.reject_reason,
+                json.dumps(draft.metadata, ensure_ascii=False),
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def list_recommendation_candidates(self, run_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT *
+                FROM recommendation_candidates
+                WHERE run_id = ?
+                ORDER BY final_score DESC, id ASC
+                """,
+                (run_id,),
+            )
+        )
+
     def get_reading_pack(self, reading_pack_id: int) -> sqlite3.Row | None:
         return self.conn.execute(
             """
@@ -485,6 +673,31 @@ class Repository:
             FROM reading_packs rp
             LEFT JOIN artifacts a ON a.id = rp.artifact_id
             JOIN books b ON b.id = rp.book_id
+            WHERE rp.id = ?
+            """,
+            (reading_pack_id,),
+        ).fetchone()
+
+    def get_reading_pack_page(self, reading_pack_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT
+                rp.*,
+                a.path AS artifact_path,
+                a.sha256 AS artifact_sha256,
+                a.metadata_json AS artifact_metadata_json,
+                b.title AS book_title,
+                b.author AS book_author,
+                r.theme,
+                r.recommendation_reason,
+                r.system_hypothesis,
+                r.expected_benefit,
+                r.risk,
+                r.reading_suggestion
+            FROM reading_packs rp
+            LEFT JOIN artifacts a ON a.id = rp.artifact_id
+            JOIN books b ON b.id = rp.book_id
+            JOIN recommendations r ON r.id = rp.recommendation_id
             WHERE rp.id = ?
             """,
             (reading_pack_id,),

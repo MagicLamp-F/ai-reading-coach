@@ -1,19 +1,28 @@
 # 当前进展总结
 
-更新时间：2026-05-31
+更新时间：2026-06-02
 
 ## 一句话状态
 
-AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP + hermes-agent 接入边界 + 快速读完包 MVP”的基础搭建阶段。当前核心闭环是：
+AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP + Hermes 默认生成 + ARC 用户端阅读页”的阶段。当前核心闭环是：
 
 ```text
 用户说明书 / SQLite 画像
--> 每日生成 3 本假设驱动推荐
--> 飞书卡片推送
+-> Hermes 每日生成假设驱动推荐
+-> Hermes 生成长快读包
+-> ARC 保存 DB 记录、Markdown artifact 和模块文件
+-> 飞书卡片推送预览与 ARC 业务 URL
+-> 用户在 ARC 阅读页阅读、分页和反馈
 -> 反馈链接收集反馈类型、原因和自由文本
 -> SQLite 保存事实
 -> 下一次 daily run 回写画像
 -> 每周生成 7 天画像复盘
+```
+
+2026-06-02 已完成 Feishu `11232` 频控修复方向、delivery outbox、默认 Hermes provider、长快读包分段生成、ARC signed reading-pack URL、移动端阅读体验修复和线上 `reading_pack_id=31` 验证。详细总结见：
+
+```text
+docs/engineering/development_history/2026-06-02_hermes_arc_delivery_and_reading_ui_summary.md
 ```
 
 Hermes 侧已经完成安装、调用入口准备和真实模型推理 smoke test。当前已经可以通过 `HERMES_REFLECTION_PROVIDER=hermes-agent` 生成 reflection draft。长期记忆写入支持两种模式：默认人工 approve/apply；开启 `HERMES_REFLECTION_AUTO_APPLY=true` 后自动写入 `USER.md` / `MEMORY.md`，并生成 `memory/change_logs` 修改记录。开启 `DAILY_REFLECTION_ENABLED=true` 后可在 `run-daily` 后自动执行。
@@ -21,6 +30,14 @@ Hermes 侧已经完成安装、调用入口准备和真实模型推理 smoke tes
 快速读完包侧已经完成 Hermes 自动飞书初版，并开始补来源层：`run-daily` 可基于每条推荐生成 `reading.fast_read_pack`，把结构化内容写入 SQLite，把长 Markdown 保存为 library artifact，并在飞书推荐卡片里展示快速读完预览。设置 `READING_PACK_PROVIDER=hermes-agent` 后，快速读完包由 Hermes 生成，不再走 fallback 占位内容。当前新增轻量 `BookSourceCollector`，会抓取推荐里的公开 `source_url`、清洗网页文本、写入 `book_sources`，并把来源摘录传入阅读包生成。
 
 Daily 推荐也已增加 Hermes 分支：设置 `DAILY_RECOMMENDATION_PROVIDER=hermes-agent` 后，主题生成和书单筛选走 `/home/ubuntu/projects/hermes-agent/bin/reflect-json`，由 Hermes 使用自己的模型配置完成，`ai-reading-coach` 只负责入库、生成 reading pack 和发飞书。
+
+Source-aware 推荐筛选已完成 v1：开启 `SOURCE_AWARE_RECOMMENDATIONS=true` 后，daily 会先生成候选书、逐本采集 Tavily/public 来源、计算 `source_coverage_score`，只把达到阈值的候选写成最终推荐。严格模式下如果不足 3 本，不会偷偷补低来源质量书，而是记录 warning 并少发。
+
+完整的“已有能力 / 待验证 / 待做路线 / OpenClaw 位置”总览见：
+
+```text
+docs/engineering/15_current_scope_and_next_plan.md
+```
 
 ## 已完成
 
@@ -107,6 +124,7 @@ DAILY_RECOMMENDATION_PROVIDER=hermes-agent
 - 已完成真实测试：`run_id=27`，生成 3 本书并走飞书发送路径。
 - 测试 run 的 `api_calls=0`，说明没有使用项目自己的 OpenAI client 生成 daily 推荐。
 - 已完成完整 Hermes 测试：`run_id=28`，推荐和快速读完包都走 Hermes，3 个 reading pack 状态均为 `generated`。
+- 已新增 source-aware candidate ranking：候选书写入 `recommendation_candidates`，最终推荐前先检查来源质量。
 
 ### 快速读完包 MVP
 
@@ -114,8 +132,10 @@ DAILY_RECOMMENDATION_PROVIDER=hermes-agent
 - 新增 `reading_packs` 表，用于保存 `reading.fast_read_pack` 的结构化内容、状态、route、schema version 和错误信息。
 - 新增 `book_sources` 表，用于保存书籍公开来源页面的标题、URL、清洗后摘录和抓取元数据。
 - 新增 `reading_pack_sources` 表，用于记录每个 reading pack 实际引用了哪些来源摘录。
+- 新增 `recommendation_candidates` 表，用于保存候选书、来源评分、最终评分、入选/拒绝状态和拒绝原因。
 - 新增 `app/reading_pack.py`，负责读取推荐上下文、生成 fast read pack、fallback、渲染 Markdown、写入 artifact。
 - 新增 `app/source_collector.py`，当前只抓取推荐记录已有的公开 `source_url`，不安装 OpenClaw、不启用浏览器、不抓取内网/localhost。
+- source collector 已支持 Tavily source grounding v1.1：可从 `TAVILY_API_KEY` 或 `/home/ubuntu/.config/tavily/api_key` 读取 key，按书名/作者做 3 类 advanced search，优先使用 Tavily `raw_content`，再计算来源质量。
 - 新增 CLI：
 
 ```bash
@@ -124,6 +144,7 @@ python3 -m app.cli generate-reading-pack --recommendation-id <id>
 
 - 当前版本已接入 `run-daily`：默认每条推荐自动生成 reading pack，并把一句话主张、10 分钟路径、核心概念、核心脉络、章节/结构地图、例子/案例、局限和 artifact 归档路径随飞书卡片一起发送。
 - 生成 reading pack 前会优先复用已有 `book_sources`；没有来源且 `source_url` 可安全访问时，会抓取公开网页摘录并传给 Hermes。
+- reading pack 和飞书预览会显示来源质量，例如 `source_rich`、`source_usable`、`source_limited`、`source_missing`，避免把来源不足的包伪装成深度快读包。
 - Hermes 生成开关：
 
 ```env
@@ -152,9 +173,12 @@ DAILY_READING_PACKS_ENABLED=false
 - 自由文本补充会更新同一条反馈，并限制长度、转义 HTML。
 - 篡改签名会被拒绝。
 - reflection adapter 能向外部命令发送结构化契约，并在外部 agent 失败时 fallback。
-- 当前主项目测试记录为 55 tests OK；Hermes/快速读完包改造后的记录为 67 tests OK；来源层新增后的局部测试已通过。
+- 当前主项目测试记录为 55 tests OK；Hermes/快速读完包改造后的记录为 67 tests OK；Tavily raw-content source grounding 接入后完整测试为 75 tests OK。
 - 快速读完包测试已覆盖新表、来源表、成功生成、fallback、推荐不存在、来源摘录进入 prompt、来源链接关系、飞书预览渲染和 daily 自动生成。
 - Hermes daily adapter 测试已覆盖 route payload 和 JSON 解析。
+- Tavily key 文件读取和 source collector search enrichment 已有单元测试；真实 Tavily smoke 已确认 key 文件可读取、advanced raw-content search 返回结果，并能把 `Monetizing Innovation` 的来源质量提升到 `source_usable`。
+- Source-aware candidate ranking 已完成受控 smoke：临时数据库、禁用飞书、禁用 reading pack，Hermes 生成 3 个候选，其中 2 个达到 `source_usable` 并被推荐，1 个 `source_limited` 被拒绝。
+- 真实 daily run `run_id=32` 已完成 source-aware 全链路：3 个候选全部 `source_rich` 并入选，3 个 reading pack 均由 `hermes-agent` 生成，无 run warning。后续修正了 reading pack 只取 3 条来源的问题，重生成推荐 `54` 后 source quality 为 `source_rich`。
 
 ## 尚未完成
 
@@ -169,14 +193,41 @@ DAILY_READING_PACKS_ENABLED=false
 
 ## 下一步
 
-1. 在服务器上完成 `.env`、公网入口和飞书 webhook 配置。
-2. 启动反馈服务，验证 `GET /healthz`。
-3. 手动执行一次 `python3 -m app.cli run-daily`，确认飞书收到 3 条推荐卡片和 1 条画像测试汇总卡片。
-4. 点击每种反馈至少一次，确认原因选择页、入库和自由文本补充都正常。
-5. 启动 daily/weekly systemd timer，按 `09_trial_run_runbook.md` 观察 7 天。
-6. 7 天后复盘真实反馈，决定是否调整原因选项、画像更新规则和推荐 prompt。
-7. 连续运行 1-2 次 `generate-reflection --days 7 --no-lark`，观察 Hermes 输出质量。
-8. 人工审查 draft，再决定是否执行 `approve-reflection` 和 `apply-reflection`。
-9. 手动执行一次 `run-daily`，检查飞书卡片里的快速读完预览是否足够有内容。
-10. 对生成的 `library/.../reading-pack.md` 做内容质量复盘，重点看公开来源摘录是否显著提升“像读过一遍”的感觉。
-11. 试运行稳定后，再进入飞书应用机器人、Hermes route 化、快速读完包公网页面、OpenClaw 和 Skill 化改造。
+### P0：跑稳当前闭环
+
+1. 确认服务器 `.env`、飞书 webhook、反馈服务公网入口和 systemd timer。
+2. 连续运行 7 天 daily/weekly，观察 run log、飞书推送、反馈写入和 SQLite 备份。
+3. 每天检查 reading pack 是否阻断日推；理论上不应阻断，只应写 warning 或 fallback。
+4. 7 天后复盘真实反馈，决定是否调整原因选项、画像更新规则和推荐 prompt。
+
+### P0：来源收集 v2
+
+1. 每本书从单个 `source_url` 扩展到 3-5 条合法公开来源。
+2. 增加来源类型：官方页、出版社页、目录页、样章页、作者访谈、公开视频文字稿、高质量公开书评。
+3. 增加来源评分、去重、失败原因入库。
+4. reading pack 明确区分“来源支持内容”和“模型推断内容”。
+
+### P1：快速读完包质量升级
+
+1. 把 pack 从“结构化总结”升级为“粗读完整本书体验”。
+2. 增加章节/部分地图、具体例子、核心论证链、反对意见、用户应用题。
+3. 增加质量字段：`source_coverage`、`chapter_confidence`、`example_density`、`user_fit_score`。
+4. 增加 reading pack 反馈按钮，用反馈判断下次应该补目录、补案例还是补章节结构。
+
+### P1：业务页面
+
+1. 做 reading pack 详情页和历史书库页。
+2. 飞书卡片只做提醒和预览，完整阅读与复盘放到页面。
+3. 页面展示推荐、来源、阅读包、反馈和画像变化。
+
+### P2：OpenClaw / Skill
+
+OpenClaw 暂不作为当前 blocker。建议先做 source collector v2；只有当普通 HTTP/search 无法处理复杂网页、浏览器流程或多步骤资料收集时，再把 OpenClaw 作为隔离的工具编排层接入。
+
+OpenClaw 接入原则：
+
+- 独立目录 `/home/ubuntu/projects/openclaw`。
+- 白名单 skill。
+- 不给 shell/SSH/系统权限。
+- 不读取 `.env`。
+- 只输出 source JSON，由 `ai-reading-coach` 审核入库。

@@ -26,6 +26,7 @@ class DailyRecommendationAgentAdapter(Protocol):
         profile_context: str,
         themes: list[str],
         search_results: list[SearchResult],
+        max_books: int = 3,
     ) -> list[dict[str, Any]]:
         ...
 
@@ -54,6 +55,8 @@ class HermesDailyRecommendationAdapter:
                 "system_prompt": "你是读书推荐系统的 Hermes 画像决策层。只输出 JSON。",
                 "user_prompt": (
                     "根据用户画像上下文生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
+                    "如果画像显示用户偏好经典名著、文学、科幻或高口碑作品，主题必须明显覆盖这些方向，"
+                    "不要只生成工程技术、商业或工具书主题。"
                     '输出格式严格为 {"themes":["主题1","主题2","主题3"]}。'
                 ),
                 "context": {"profile_context": profile_context},
@@ -71,6 +74,7 @@ class HermesDailyRecommendationAdapter:
         profile_context: str,
         themes: list[str],
         search_results: list[SearchResult],
+        max_books: int = 3,
     ) -> list[dict[str, Any]]:
         search_context = "\n".join(
             f"- {result.title}\n  {result.url}\n  {result.content[:300]}"
@@ -85,9 +89,13 @@ class HermesDailyRecommendationAdapter:
                 "format": "json",
                 "system_prompt": "你是读书私教系统的 Hermes 推荐筛选层。只输出 JSON，不要输出 Markdown。",
                 "user_prompt": (
-                    "基于用户画像上下文、今日主题和搜索结果，筛选并推荐 3 本书。"
+                    f"基于用户画像上下文、今日主题和搜索结果，筛选并输出 {max_books} 本候选书。"
+                    "优先推荐真正的书，尤其是经典名著、高口碑文学、严肃小说、科幻经典或长期被讨论的作品；"
+                    "如果用户提到《一句顶一万句》《三体》这类偏好，应优先选择相近气质或同等口碑的书。"
+                    "不要把云厂商文章、博客文章、课程页或普通技术文章当作书籍来源。"
                     "每本书必须包含 title, author, source_url, slot_type, theme, system_hypothesis, "
                     "profile_dimensions, recommendation_reason, profile_mapping, expected_benefit, risk, reading_suggestion。"
+                    "建议额外包含 user_fit_score 和 candidate_reason。"
                     "slot_type 只能是 profile_fit 或 exploration。"
                     '输出格式严格为 {"books":[...]}。'
                 ),
@@ -120,7 +128,7 @@ class HermesDailyRecommendationAdapter:
         books = response.get("books")
         if not isinstance(books, list) or not books:
             raise DailyAgentAdapterError("Hermes returned no recommendation books")
-        return [book for book in books if isinstance(book, dict)][:3]
+        return [book for book in books if isinstance(book, dict)][:max_books]
 
     def _call(self, payload: dict[str, Any]) -> dict[str, Any]:
         argv = shlex.split(self.command)

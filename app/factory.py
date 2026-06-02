@@ -37,9 +37,29 @@ def build_context(settings: Settings) -> AppContext:
     http = HttpClient(timeout_seconds=settings.http_timeout_seconds)
     search = TavilySearch(settings.tavily_api_key, http)
     llm = OpenAIChatClient(settings.openai_api_key, settings.openai_model, settings.openai_base_url, http)
-    lark = LarkRobotClient(settings.lark_webhook_url, settings.lark_webhook_secret, http)
+    lark = LarkRobotClient(
+        settings.lark_webhook_url,
+        settings.lark_webhook_secret,
+        http,
+        max_send_attempts=settings.lark_max_send_attempts,
+        retry_base_seconds=settings.lark_retry_base_seconds,
+        rate_limit_cooldown_seconds=settings.lark_rate_limit_cooldown_seconds,
+    )
     telegram = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id, http)
-    source_collector = BookSourceCollector(repo, http)
+    source_http = HttpClient(
+        timeout_seconds=settings.source_fetch_timeout_seconds,
+        retries=settings.source_fetch_retries,
+    )
+    source_collector = BookSourceCollector(
+        repo,
+        source_http,
+        search=search,
+        search_enabled=settings.source_search_enabled,
+        max_search_results=settings.source_search_max_results,
+        search_depth=settings.source_search_depth,
+        search_queries_per_book=settings.source_search_queries_per_book,
+        include_raw_content=settings.source_search_include_raw_content,
+    )
     reflection_adapter = build_reflection_adapter(
         provider=settings.hermes_reflection_provider,
         llm=llm,
@@ -67,11 +87,17 @@ def build_context(settings: Settings) -> AppContext:
         feedback_secret=settings.feedback_secret,
         max_search_calls=settings.max_daily_search_calls,
         max_model_calls=settings.max_daily_model_calls,
+        daily_recommendation_count=settings.daily_recommendation_count,
         reading_packs_enabled=settings.daily_reading_packs_enabled,
         reading_pack_library_dir=settings.reading_pack_library_dir,
         daily_recommendation_agent=daily_recommendation_agent,
         reading_pack_agent=reading_pack_agent,
         source_collector=source_collector,
+        source_aware_recommendations=settings.source_aware_recommendations,
+        source_aware_strict_mode=settings.source_aware_strict_mode,
+        source_aware_candidate_count=settings.source_aware_candidate_count,
+        source_min_coverage_score=settings.source_min_coverage_score,
+        source_aware_allow_limited_fill=settings.source_aware_allow_limited_fill,
     )
     return AppContext(
         settings=settings,

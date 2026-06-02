@@ -117,6 +117,21 @@ def verify_feedback_free_text_signature(feedback_id: int, token: str, secret: st
     return hmac.compare_digest(expected, token)
 
 
+def sign_reading_pack(reading_pack_id: int, secret: str) -> str:
+    if not secret:
+        raise ValueError("FEEDBACK_SECRET is required")
+    message = f"reading_pack:{reading_pack_id}".encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def verify_reading_pack_signature(reading_pack_id: int, token: str, secret: str) -> bool:
+    if not token or not secret:
+        return False
+    expected = sign_reading_pack(reading_pack_id, secret)
+    return hmac.compare_digest(expected, token)
+
+
 def build_feedback_url(base_url: str, recommendation_id: int, feedback_type: str, secret: str, reason_code: str = "") -> str:
     params = {
         "recommendation_id": str(recommendation_id),
@@ -127,3 +142,11 @@ def build_feedback_url(base_url: str, recommendation_id: int, feedback_type: str
         params["reason_code"] = reason_code
     query = urlencode(params)
     return f"{base_url.rstrip('/')}/feedback?{query}"
+
+
+def build_reading_pack_url(base_url: str, reading_pack_id: int, secret: str) -> str:
+    params = {
+        "id": str(reading_pack_id),
+        "token": sign_reading_pack(reading_pack_id, secret),
+    }
+    return f"{base_url.rstrip('/')}/reading-pack?{urlencode(params)}"

@@ -131,8 +131,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             book_id INTEGER NOT NULL,
             artifact_id INTEGER,
             status TEXT NOT NULL DEFAULT 'generated' CHECK(status IN ('generated', 'fallback', 'failed')),
-            route TEXT NOT NULL DEFAULT 'reading.fast_read_pack',
-            schema_version TEXT NOT NULL DEFAULT 'fast_read_pack_v1',
+            route TEXT NOT NULL DEFAULT 'reading.deep_read_pack',
+            schema_version TEXT NOT NULL DEFAULT 'deep_read_pack_v2',
             title TEXT NOT NULL,
             summary TEXT NOT NULL DEFAULT '',
             content_json TEXT NOT NULL DEFAULT '{}',
@@ -169,6 +169,44 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(book_source_id) REFERENCES book_sources(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS recommendation_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            source_provider TEXT NOT NULL DEFAULT '',
+            candidate_reason TEXT NOT NULL DEFAULT '',
+            user_fit_score REAL NOT NULL DEFAULT 0,
+            source_coverage_score REAL NOT NULL DEFAULT 0,
+            final_score REAL NOT NULL DEFAULT 0,
+            source_status TEXT NOT NULL DEFAULT 'source_missing',
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'selected', 'rejected')),
+            reject_reason TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(run_id) REFERENCES run_logs(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS delivery_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL,
+            message_type TEXT NOT NULL,
+            recommendation_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'sent', 'failed')),
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            next_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            sent_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(recommendation_id) REFERENCES recommendations(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_profile_category_weight ON profile_items(category, weight DESC, confidence DESC);
         CREATE INDEX IF NOT EXISTS idx_feedback_unprocessed ON feedback_events(processed_at);
         CREATE INDEX IF NOT EXISTS idx_recommendations_date ON recommendations(recommendation_date);
@@ -179,6 +217,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_reading_packs_book ON reading_packs(book_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_book_sources_book ON book_sources(book_id, fetched_at DESC);
         CREATE INDEX IF NOT EXISTS idx_reading_pack_sources_source ON reading_pack_sources(book_source_id);
+        CREATE INDEX IF NOT EXISTS idx_recommendation_candidates_run_score ON recommendation_candidates(run_id, final_score DESC);
+        CREATE INDEX IF NOT EXISTS idx_recommendation_candidates_status ON recommendation_candidates(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_delivery_outbox_pending ON delivery_outbox(status, next_attempt_at, id);
+        CREATE INDEX IF NOT EXISTS idx_delivery_outbox_recommendation ON delivery_outbox(recommendation_id, status);
         """
     )
     _ensure_column(conn, "recommendations", "system_hypothesis", "TEXT NOT NULL DEFAULT ''")

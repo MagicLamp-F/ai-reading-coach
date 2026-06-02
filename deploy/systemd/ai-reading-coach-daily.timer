@@ -1,8 +1,8 @@
 [Unit]
-Description=Run AI Reading Coach daily recommendations at 08:00
+Description=Run AI Reading Coach daily recommendations at 04:30
 
 [Timer]
-OnCalendar=*-*-* 08:00:00
+OnCalendar=*-*-* 04:30:00
 Persistent=true
 Unit=ai-reading-coach-daily.service
 

@@ -75,9 +75,13 @@ class DatabaseMigrationTests(unittest.TestCase):
             conn = connect(Path(tmp) / "test.db")
             init_db(conn)
             artifact_columns = {row["name"] for row in conn.execute("PRAGMA table_info(artifacts)")}
-            pack_columns = {row["name"] for row in conn.execute("PRAGMA table_info(reading_packs)")}
+            pack_info = list(conn.execute("PRAGMA table_info(reading_packs)"))
+            pack_columns = {row["name"] for row in pack_info}
+            pack_defaults = {row["name"]: row["dflt_value"] for row in pack_info}
             source_columns = {row["name"] for row in conn.execute("PRAGMA table_info(book_sources)")}
             link_columns = {row["name"] for row in conn.execute("PRAGMA table_info(reading_pack_sources)")}
+            candidate_columns = {row["name"] for row in conn.execute("PRAGMA table_info(recommendation_candidates)")}
+            outbox_columns = {row["name"] for row in conn.execute("PRAGMA table_info(delivery_outbox)")}
             conn.close()
 
         self.assertIn("path", artifact_columns)
@@ -85,8 +89,15 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("recommendation_id", pack_columns)
         self.assertIn("artifact_id", pack_columns)
         self.assertIn("content_json", pack_columns)
+        self.assertEqual(pack_defaults["route"], "'reading.deep_read_pack'")
+        self.assertEqual(pack_defaults["schema_version"], "'deep_read_pack_v2'")
         self.assertIn("text_excerpt", source_columns)
         self.assertIn("book_source_id", link_columns)
+        self.assertIn("source_coverage_score", candidate_columns)
+        self.assertIn("reject_reason", candidate_columns)
+        self.assertIn("message_type", outbox_columns)
+        self.assertIn("next_attempt_at", outbox_columns)
+        self.assertIn("attempt_count", outbox_columns)
 
 
 if __name__ == "__main__":

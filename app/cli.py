@@ -38,9 +38,12 @@ def main() -> None:
     seed.add_argument("--file", required=True, help="Path to a UTF-8 text file")
 
     subparsers.add_parser("run-daily", help="Run one daily recommendation workflow")
+    resend = subparsers.add_parser("resend-pending-deliveries", help="Retry pending delivery outbox messages")
+    resend.add_argument("--limit", type=int, default=20, help="Maximum pending deliveries to retry")
+    resend.add_argument("--max-attempts", type=int, default=5, help="Mark a delivery failed after this many retries")
     subparsers.add_parser("run-weekly-report", help="Send one weekly profile report")
 
-    reading_pack = subparsers.add_parser("generate-reading-pack", help="Generate a fast read pack for a recommendation")
+    reading_pack = subparsers.add_parser("generate-reading-pack", help="Generate a deep read pack for a recommendation")
     reading_pack.add_argument("--recommendation-id", type=int, required=True, help="Recommendation id")
     reading_pack.add_argument("--library-dir", default="library", help="Directory for long-form reading artifacts")
 
@@ -109,6 +112,11 @@ def main() -> None:
         print(f"Daily recommendation run completed: run_id={run_id}")
         return
 
+    if args.command == "resend-pending-deliveries":
+        sent = context.workflow.resend_pending_deliveries(limit=args.limit, max_attempts=args.max_attempts)
+        print(f"Pending deliveries retried: sent={sent}")
+        return
+
     if args.command == "run-weekly-report":
         context.workflow.send_weekly_report()
         print("Weekly report sent")
@@ -125,7 +133,7 @@ def main() -> None:
             source_collector=context.source_collector,
         )
         result = service.generate_for_recommendation(args.recommendation_id)
-        print(f"Fast read pack generated: id={result.reading_pack_id}")
+        print(f"Deep read pack generated: id={result.reading_pack_id}")
         print(f"Status: {result.status}")
         print(f"Artifact: {result.artifact_path}")
         return

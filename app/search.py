@@ -13,6 +13,7 @@ class SearchResult:
     title: str
     url: str
     content: str
+    raw_content: str = ""
 
 
 class TavilySearch:
@@ -20,16 +21,22 @@ class TavilySearch:
         self.api_key = api_key
         self.http = http
 
-    def search_books(self, query: str, max_results: int = 5) -> list[SearchResult]:
+    def search_books(
+        self,
+        query: str,
+        max_results: int = 5,
+        search_depth: str = "basic",
+        include_raw_content: bool = False,
+    ) -> list[SearchResult]:
         if not self.api_key:
             return []
         payload = {
             "api_key": self.api_key,
             "query": query,
-            "search_depth": "basic",
+            "search_depth": search_depth,
             "max_results": max_results,
             "include_answer": False,
-            "include_raw_content": False,
+            "include_raw_content": include_raw_content,
         }
         response = self.http.post_json("https://api.tavily.com/search", payload)
         if response.status >= 400:
@@ -41,7 +48,7 @@ class TavilySearch:
                 title=str(item.get("title", "")),
                 url=str(item.get("url", "")),
                 content=str(item.get("content", "")),
+                raw_content=str(item.get("raw_content", "") or ""),
             )
             for item in results
         ]
-

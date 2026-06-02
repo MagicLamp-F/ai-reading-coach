@@ -2,21 +2,27 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Any
 
-from app.feedback import FEEDBACK_LABELS, FEEDBACK_REASON_LABELS, FEEDBACK_TYPES, build_feedback_url
+from app.feedback import FEEDBACK_LABELS, FEEDBACK_REASON_LABELS, FEEDBACK_TYPES, build_feedback_url, build_reading_pack_url
 from app.daily_agent_adapter import DailyRecommendationAgentAdapter
 from app.lark import LarkFeedbackLink, LarkRobotClient
 from app.llm import OpenAIChatClient
 from app.memory import DEFAULT_LONG_TERM_MEMORY_MAX_CHARS, load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
 from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview
-from app.repository import RecommendationDraft, Repository
+from app.repository import DeliveryOutboxDraft, RecommendationCandidateDraft, RecommendationDraft, Repository
 from app.search import SearchResult, TavilySearch
-from app.source_collector import BookSourceCollector
+from app.source_collector import (
+    BookSourceCollector,
+    is_article_like_book_source_url,
+    is_preferred_book_landing_url,
+    source_quality_from_sources,
+)
 from app.telegram import feedback_markup, format_recommendation_message, TelegramClient
 
 logger = logging.getLogger(__name__)
@@ -89,6 +95,7 @@ class ReadingCoachWorkflow:
         feedback_secret: str,
         max_search_calls: int,
         max_model_calls: int,
+        daily_recommendation_count: int = 3,
         memory_dir: Path = Path("memory"),
         max_memory_chars: int = DEFAULT_LONG_TERM_MEMORY_MAX_CHARS,
         reading_packs_enabled: bool = False,
@@ -96,6 +103,11 @@ class ReadingCoachWorkflow:
         daily_recommendation_agent: DailyRecommendationAgentAdapter | None = None,
         reading_pack_agent: HermesReadingPackAdapter | None = None,
         source_collector: BookSourceCollector | None = None,
+        source_aware_recommendations: bool = False,
+        source_aware_strict_mode: bool = True,
+        source_aware_candidate_count: int = 6,
+        source_min_coverage_score: float = 0.5,
+        source_aware_allow_limited_fill: bool = False,
     ):
         self.repo = repo
         self.search = search
@@ -107,6 +119,7 @@ class ReadingCoachWorkflow:
         self.feedback_secret = feedback_secret
         self.max_search_calls = max_search_calls
         self.max_model_calls = max_model_calls
+        self.daily_recommendation_count = max(1, daily_recommendation_count)
         self.memory_dir = memory_dir
         self.max_memory_chars = max_memory_chars
         self.reading_packs_enabled = reading_packs_enabled
@@ -114,6 +127,11 @@ class ReadingCoachWorkflow:
         self.daily_recommendation_agent = daily_recommendation_agent
         self.reading_pack_agent = reading_pack_agent
         self.source_collector = source_collector
+        self.source_aware_recommendations = source_aware_recommendations
+        self.source_aware_strict_mode = source_aware_strict_mode
+        self.source_aware_candidate_count = source_aware_candidate_count
+        self.source_min_coverage_score = source_min_coverage_score
+        self.source_aware_allow_limited_fill = source_aware_allow_limited_fill
 
     def run_daily_recommendations(self) -> int:
         run_id = self.repo.create_run("daily_recommendation", {"channel": self.channel})
@@ -134,7 +152,10 @@ class ReadingCoachWorkflow:
                 if api_calls >= self.max_daily_api_calls:
                     break
                 try:
-                    results = self.search.search_books(f"{theme} 推荐 书籍 目录 书评", max_results=4)
+                    results = self.search.search_books(
+                        f"{theme} 经典 名著 高口碑 文学 科幻 书籍 目录 书评",
+                        max_results=4,
+                    )
                 except Exception:
                     logger.exception("Search failed for theme=%s; continuing without those results", theme)
                     continue
@@ -143,20 +164,40 @@ class ReadingCoachWorkflow:
                     api_calls += 1
                     self.repo.record_cost(run_id, "tavily", "search_books", 1, {"theme": theme})
 
-            drafts = self._generate_recommendations(profile_context, themes, search_results)
+            recommendation_limit = (
+                self.source_aware_candidate_count
+                if self.source_aware_recommendations
+                else self.daily_recommendation_count
+            )
+            drafts = self._generate_recommendations(profile_context, themes, search_results, recommendation_limit)
+            drafts = self._source_aware_rank_drafts(run_id, drafts)
             if self.daily_recommendation_agent is None and self.llm.api_key:
                 api_calls += 1
                 self.repo.record_cost(run_id, "model", "generate_recommendations", 1, {"model": self.llm.model})
 
             today = datetime.now().date()
-            total = min(3, len(drafts))
+            total = min(self.daily_recommendation_count, len(drafts))
             sent_drafts: list[RecommendationDraft] = []
-            for index, draft in enumerate(drafts[:3], start=1):
+            for index, draft in enumerate(drafts[: self.daily_recommendation_count], start=1):
                 recommendation_id = self.repo.add_recommendation(run_id, draft, today)
                 reading_pack_preview = self._generate_reading_pack_preview(run_id, recommendation_id)
                 message_id = self._send_recommendation(index, total, recommendation_id, draft, reading_pack_preview)
                 if message_id is None and self._recommendation_channel_enabled():
-                    raise RuntimeError(f"recommendation send failed: recommendation_id={recommendation_id}")
+                    warning = f"recommendation delivery queued: recommendation_id={recommendation_id}"
+                    if getattr(self.lark, "last_send_error", ""):
+                        warning = f"{warning}: {self.lark.last_send_error}"
+                    logger.warning(warning)
+                    self.repo.record_run_warning(run_id, warning)
+                    self.repo.enqueue_delivery(
+                        DeliveryOutboxDraft(
+                            channel=self.channel,
+                            message_type="recommendation",
+                            recommendation_id=recommendation_id,
+                            metadata={"index": index, "total": total, "run_id": run_id},
+                            last_error=getattr(self.lark, "last_send_error", "") or "send returned no message_id",
+                            next_attempt_seconds=300,
+                        )
+                    )
                 if message_id:
                     self.repo.set_recommendation_message_id(recommendation_id, message_id)
                 sent_drafts.append(draft)
@@ -268,6 +309,54 @@ class ReadingCoachWorkflow:
             self.repo.finish_run(run_id, "failed", error_message=str(exc))
             raise
 
+    def resend_pending_deliveries(self, limit: int = 20, max_attempts: int = 5) -> int:
+        sent = 0
+        for delivery in self.repo.pending_deliveries(limit):
+            message_type = str(delivery["message_type"])
+            if message_type != "recommendation":
+                self.repo.mark_delivery_retry(
+                    int(delivery["id"]),
+                    f"unsupported message_type={message_type}",
+                    next_attempt_seconds=3600,
+                    max_attempts=max_attempts,
+                )
+                continue
+            recommendation_id = delivery["recommendation_id"]
+            if recommendation_id is None:
+                self.repo.mark_delivery_retry(
+                    int(delivery["id"]),
+                    "missing recommendation_id",
+                    next_attempt_seconds=3600,
+                    max_attempts=max_attempts,
+                )
+                continue
+            draft = self._draft_from_recommendation_id(int(recommendation_id))
+            if draft is None:
+                self.repo.mark_delivery_retry(
+                    int(delivery["id"]),
+                    f"recommendation not found: id={recommendation_id}",
+                    next_attempt_seconds=3600,
+                    max_attempts=max_attempts,
+                )
+                continue
+            metadata = _json_loads(str(delivery["metadata_json"] or "{}"), {})
+            index = int(metadata.get("index") or 1) if isinstance(metadata, dict) else 1
+            total = int(metadata.get("total") or 1) if isinstance(metadata, dict) else 1
+            message_id = self._send_recommendation(index, total, int(recommendation_id), draft, None)
+            if message_id is not None:
+                if message_id:
+                    self.repo.set_recommendation_message_id(int(recommendation_id), message_id)
+                self.repo.mark_delivery_sent(int(delivery["id"]))
+                sent += 1
+                continue
+            self.repo.mark_delivery_retry(
+                int(delivery["id"]),
+                getattr(self.lark, "last_send_error", "") or "send returned no message_id",
+                next_attempt_seconds=900,
+                max_attempts=max_attempts,
+            )
+        return sent
+
     def _send_recommendation(
         self,
         index: int,
@@ -288,6 +377,27 @@ class ReadingCoachWorkflow:
         ]
         return self.lark.send_recommendation(index, total, draft, links, reading_pack_preview)
 
+    def _draft_from_recommendation_id(self, recommendation_id: int) -> RecommendationDraft | None:
+        row = self.repo.get_recommendation_detail(recommendation_id)
+        if row is None:
+            return None
+        metadata = _json_loads(str(row["metadata_json"] or "{}"), {})
+        return RecommendationDraft(
+            title=str(row["title"]),
+            author=str(row["author"]),
+            source_url=str(row["source_url"]),
+            slot_type=str(row["slot_type"]),
+            theme=str(row["theme"]),
+            recommendation_reason=str(row["recommendation_reason"]),
+            profile_mapping=str(row["profile_mapping"]),
+            system_hypothesis=str(row["system_hypothesis"]),
+            profile_dimensions=_profile_dimensions(row["profile_dimensions"]),
+            expected_benefit=str(row["expected_benefit"]),
+            risk=str(row["risk"]),
+            reading_suggestion=str(row["reading_suggestion"]),
+            metadata=metadata if isinstance(metadata, dict) else {},
+        )
+
     def _generate_reading_pack_preview(self, run_id: int, recommendation_id: int) -> ReadingPackPreview | None:
         if not self.reading_packs_enabled:
             return None
@@ -301,12 +411,39 @@ class ReadingCoachWorkflow:
                 agent=self.reading_pack_agent,
                 source_collector=self.source_collector,
             ).generate_for_recommendation(recommendation_id)
-            return result.preview
+            return replace(
+                result.preview,
+                reading_pack_url=build_reading_pack_url(
+                    self.public_base_url,
+                    result.reading_pack_id,
+                    self.feedback_secret,
+                ),
+            )
         except Exception as exc:
             warning = f"reading pack generation failed: recommendation_id={recommendation_id}: {exc}"
             logger.warning(warning)
             self.repo.record_run_warning(run_id, warning)
             return None
+
+    def _send_reading_pack_preview(
+        self,
+        run_id: int,
+        recommendation_id: int,
+        reading_pack_preview: ReadingPackPreview,
+    ) -> None:
+        if self.channel != "lark" or not self.lark.enabled():
+            return
+        try:
+            message_id = self.lark.send_reading_pack_preview(reading_pack_preview)
+        except Exception as exc:
+            warning = f"reading pack preview lark send failed: recommendation_id={recommendation_id}: {exc}"
+            logger.warning(warning)
+            self.repo.record_run_warning(run_id, warning)
+            return
+        if message_id is None:
+            warning = f"reading pack preview lark send failed: recommendation_id={recommendation_id}"
+            logger.warning(warning)
+            self.repo.record_run_warning(run_id, warning)
 
     def _send_text(self, text: str) -> str | None:
         if self.channel == "telegram":
@@ -324,6 +461,8 @@ class ReadingCoachWorkflow:
         return self.lark.enabled()
 
     def _send_profile_test_summary(self, run_id: int, drafts: list[RecommendationDraft]) -> None:
+        if self.daily_recommendation_count < 3:
+            return
         if self.channel != "lark" or not self.lark.enabled() or len(drafts) < 3:
             return
         try:
@@ -350,6 +489,8 @@ class ReadingCoachWorkflow:
                 "你是读书推荐系统的画像决策层。只输出 JSON。",
                 (
                     "根据用户画像上下文生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
+                    "如果画像显示用户偏好经典名著、文学、科幻或高口碑作品，主题必须明显覆盖这些方向，"
+                    "不要只生成工程技术、商业或工具书主题。"
                     "用户画像上下文明确分为 SQLite structured profile 和 Hermes long-term memory；"
                     "二者都可使用，但不要假设未出现在上下文中的 draft reflection 已生效。"
                     '输出格式：{"themes":["主题1","主题2","主题3"]}\n\n'
@@ -369,11 +510,17 @@ class ReadingCoachWorkflow:
         profile_context: str,
         themes: list[str],
         search_results: list[SearchResult],
+        max_books: int = 3,
     ) -> list[RecommendationDraft]:
         if self.daily_recommendation_agent is not None:
             try:
-                books = self.daily_recommendation_agent.generate_recommendations(profile_context, themes, search_results)
-                drafts = [self._draft_from_dict(item) for item in books[:3] if isinstance(item, dict)]
+                books = self.daily_recommendation_agent.generate_recommendations(
+                    profile_context,
+                    themes,
+                    search_results,
+                    max_books=max_books,
+                )
+                drafts = [self._draft_from_dict(item) for item in books[:max_books] if isinstance(item, dict)]
                 if drafts:
                     return drafts
             except Exception:
@@ -388,11 +535,15 @@ class ReadingCoachWorkflow:
             response = self.llm.complete_json(
                 "你是读书私教系统的执行层。只输出 JSON，不要输出 Markdown。",
                 (
-                    "基于用户画像上下文、今日主题和搜索结果，推荐 3 本书。"
                     "用户画像上下文明确分为 SQLite structured profile 和 Hermes long-term memory；"
                     "二者都可使用，但不要假设未出现在上下文中的 draft reflection 已生效。"
+                    f"基于用户画像上下文、今日主题和搜索结果，输出 {max_books} 本候选书。"
+                    "优先推荐真正的书，尤其是经典名著、高口碑文学、严肃小说、科幻经典或长期被讨论的作品；"
+                    "如果用户提到《一句顶一万句》《三体》这类偏好，应优先选择相近气质或同等口碑的书。"
+                    "不要把云厂商文章、博客文章、课程页或普通技术文章当作书籍来源。"
                     "每本书必须包含 title, author, source_url, slot_type, theme, system_hypothesis, "
                     "profile_dimensions, recommendation_reason, profile_mapping, expected_benefit, risk, reading_suggestion。"
+                    "建议额外包含 user_fit_score 和 candidate_reason。"
                     "system_hypothesis 说明这本书正在测试哪个用户假设；profile_dimensions 是画像维度字符串数组。"
                     "slot_type 只能是 profile_fit 或 exploration。"
                     '输出格式：{"books":[...]}。\n\n'
@@ -406,10 +557,117 @@ class ReadingCoachWorkflow:
             return [self._draft_from_dict(item) for item in FALLBACK_BOOKS]
         books = response.get("books") if isinstance(response, dict) else None
         if isinstance(books, list) and books:
-            drafts = [self._draft_from_dict(item) for item in books[:3] if isinstance(item, dict)]
+            drafts = [self._draft_from_dict(item) for item in books[:max_books] if isinstance(item, dict)]
             if drafts:
                 return drafts
         return [self._draft_from_dict(item) for item in FALLBACK_BOOKS]
+
+    def _source_aware_rank_drafts(self, run_id: int, drafts: list[RecommendationDraft]) -> list[RecommendationDraft]:
+        if not self.source_aware_recommendations or self.source_collector is None:
+            return drafts[: self.daily_recommendation_count]
+        ranked = []
+        seen = set()
+        for draft in drafts[: self.source_aware_candidate_count]:
+            key = (draft.title.strip().lower(), draft.author.strip().lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            book_id = self.repo.upsert_book(draft.title, draft.author, draft.source_url, draft.metadata)
+            existing_sources = self.repo.book_sources_for_book(book_id, limit=10)
+            if not existing_sources:
+                self.source_collector.collect_for_book(book_id, draft.title, draft.author, draft.source_url)
+            sources = self.repo.book_sources_for_book(book_id, limit=10)
+            quality = source_quality_from_sources(sources)
+            source_score = float(quality.get("score") or 0)
+            user_fit_score = _float_score(draft.metadata.get("user_fit_score"), 0.65)
+            preferred_source_url = _preferred_source_url(draft.source_url, sources)
+            article_like_penalty = 0.25 if is_article_like_book_source_url(draft.source_url) and not preferred_source_url else 0.0
+            landing_bonus = 0.08 if preferred_source_url or is_preferred_book_landing_url(draft.source_url) else 0.0
+            final_score = round(max(0.0, (user_fit_score * 0.45) + (source_score * 0.55) + landing_bonus - article_like_penalty), 3)
+            ranked_draft = draft
+            if preferred_source_url and preferred_source_url != draft.source_url:
+                ranked_draft = RecommendationDraft(
+                    title=draft.title,
+                    author=draft.author,
+                    source_url=preferred_source_url,
+                    slot_type=draft.slot_type,
+                    theme=draft.theme,
+                    recommendation_reason=draft.recommendation_reason,
+                    profile_mapping=draft.profile_mapping,
+                    system_hypothesis=draft.system_hypothesis,
+                    profile_dimensions=draft.profile_dimensions,
+                    expected_benefit=draft.expected_benefit,
+                    risk=draft.risk,
+                    reading_suggestion=draft.reading_suggestion,
+                    metadata={**draft.metadata, "original_source_url": draft.source_url},
+                )
+            ranked.append(
+                {
+                    "draft": ranked_draft,
+                    "book_id": book_id,
+                    "quality": quality,
+                    "user_fit_score": user_fit_score,
+                    "final_score": final_score,
+                    "preferred_source_url": preferred_source_url,
+                }
+            )
+
+        ranked.sort(key=lambda item: item["final_score"], reverse=True)
+        qualified = [item for item in ranked if float(item["quality"].get("score") or 0) >= self.source_min_coverage_score]
+        selected = qualified[: self.daily_recommendation_count]
+        if len(selected) < self.daily_recommendation_count and self.source_aware_allow_limited_fill:
+            selected_ids = {id(item["draft"]) for item in selected}
+            selected.extend(item for item in ranked if id(item["draft"]) not in selected_ids)  # type: ignore[arg-type]
+            selected = selected[: self.daily_recommendation_count]
+
+        selected_keys = {
+            (item["draft"].title.strip().lower(), item["draft"].author.strip().lower())
+            for item in selected
+        }
+        for item in ranked:
+            draft = item["draft"]
+            source_score = float(item["quality"].get("score") or 0)
+            is_selected = (draft.title.strip().lower(), draft.author.strip().lower()) in selected_keys
+            if is_selected:
+                status = "selected"
+                reject_reason = ""
+            elif source_score < self.source_min_coverage_score:
+                status = "rejected"
+                reject_reason = "source_coverage_below_threshold"
+            elif is_article_like_book_source_url(draft.source_url) and not item.get("preferred_source_url"):
+                status = "rejected"
+                reject_reason = "source_url_is_article_not_book_page"
+            else:
+                status = "rejected"
+                reject_reason = "ranked_below_selected_candidates"
+            self.repo.add_recommendation_candidate(
+                RecommendationCandidateDraft(
+                    run_id=run_id,
+                    book_id=int(item["book_id"]),
+                    title=draft.title,
+                    author=draft.author,
+                    source_url=draft.source_url,
+                    source_provider="source_aware_v1",
+                    candidate_reason=str(draft.metadata.get("candidate_reason", "")),
+                    user_fit_score=float(item["user_fit_score"]),
+                    source_coverage_score=source_score,
+                    final_score=float(item["final_score"]),
+                    source_status=str(item["quality"].get("status") or "source_missing"),
+                    status=status,
+                    reject_reason=reject_reason,
+                    metadata={"source_quality": item["quality"], "draft_metadata": draft.metadata},
+                )
+            )
+
+        target_count = min(self.daily_recommendation_count, len(ranked))
+        if self.source_aware_strict_mode and len(selected) < target_count:
+            warning = (
+                f"source-aware recommendation selected fewer than {self.daily_recommendation_count} books: "
+                f"selected={len(selected)} candidates={len(ranked)} threshold={self.source_min_coverage_score}"
+            )
+            logger.warning(warning)
+            self.repo.record_run_warning(run_id, warning)
+        return [item["draft"] for item in selected]
 
     def _draft_from_dict(self, item: dict[str, Any]) -> RecommendationDraft:
         return RecommendationDraft(
@@ -425,7 +683,11 @@ class ReadingCoachWorkflow:
             expected_benefit=str(item.get("expected_benefit", ""))[:800],
             risk=str(item.get("risk", ""))[:800],
             reading_suggestion=str(item.get("reading_suggestion", ""))[:800],
-            metadata={"source": "llm_or_fallback"},
+            metadata={
+                "source": "llm_or_fallback",
+                "user_fit_score": _float_score(item.get("user_fit_score"), 0.65),
+                "candidate_reason": str(item.get("candidate_reason", item.get("recommendation_reason", "")))[:800],
+            },
         )
 
 
@@ -440,6 +702,50 @@ def _profile_dimensions(raw: Any) -> list[str]:
         if isinstance(parsed, list):
             return [str(item)[:80] for item in parsed if str(item).strip()][:8]
     return ["long_term_interest", "reading_preference"]
+
+
+def _json_loads(raw: str, default: Any) -> Any:
+    try:
+        return json.loads(raw or "")
+    except json.JSONDecodeError:
+        return default
+
+
+def _float_score(raw: Any, default: float) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, value))
+
+
+def _preferred_source_url(current_url: str, sources: list[Any]) -> str:
+    if is_preferred_book_landing_url(current_url):
+        return current_url
+    source_type_order = {
+        "official_page": 0,
+        "sample_chapter": 1,
+        "table_of_contents": 2,
+        "public_page": 3,
+        "review": 4,
+    }
+    candidates = []
+    for source in sources:
+        try:
+            url = str(source["url"] or "")
+            title = str(source["title"] or "")
+            source_type = str(source["source_type"] or "")
+        except (KeyError, TypeError, IndexError):
+            url = str(getattr(source, "url", "") or "")
+            title = str(getattr(source, "title", "") or "")
+            source_type = str(getattr(source, "source_type", "") or "")
+        if not url or not is_preferred_book_landing_url(url, title):
+            continue
+        candidates.append((source_type_order.get(source_type, 99), url))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
 
 
 def build_daily_profile_context(structured_profile_context: str, long_term_memory_context: str) -> str:

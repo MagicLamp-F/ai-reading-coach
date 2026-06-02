@@ -164,6 +164,9 @@ class LarkTests(unittest.TestCase):
                 chapter_items=("第一部分：问题", "第二部分：方法"),
                 examples=("用运行日志定位问题",),
                 limitations=("需要人工校验公开来源",),
+                source_status="source_limited",
+                source_coverage_score=0.35,
+                source_count=1,
                 artifact_path="library/2026/05/test/reading-pack.md",
                 status="fallback",
             ),
@@ -174,13 +177,45 @@ class LarkTests(unittest.TestCase):
             for element in http.payload["card"]["elements"]
             if element.get("tag") == "div"
         )
-        self.assertIn("快速读完包", rendered)
+        self.assertIn("深度读完包", rendered)
+        self.assertIn("来源质量：source_limited / 0.35（1 条来源）", rendered)
         self.assertIn("这本书讲如何搭建可靠系统", rendered)
         self.assertIn("先读核心论点和章节地图", rendered)
         self.assertIn("核心概念", rendered)
-        self.assertIn("章节/结构地图", rendered)
+        self.assertIn("章节/部分 walkthrough", rendered)
         self.assertIn("例子/案例", rendered)
         self.assertIn("library/2026/05/test/reading-pack.md", rendered)
+
+    def test_can_send_standalone_reading_pack_preview_card(self):
+        http = CapturingHttp()
+        client = LarkRobotClient(webhook_url="https://example.test/webhook", webhook_secret="", http=http)
+
+        message_id = client.send_reading_pack_preview(
+            ReadingPackPreview(
+                summary="这本书讲如何搭建可靠系统。",
+                ten_min_route="先读核心论点和章节地图。",
+                core_points=("先明确问题",),
+                concepts=("可靠性",),
+                chapter_items=("第一部分：问题",),
+                examples=("用运行日志定位问题",),
+                limitations=("需要人工校验公开来源",),
+                source_status="source_limited",
+                source_coverage_score=0.35,
+                source_count=1,
+                artifact_path="library/2026/05/test/reading-pack.md",
+                status="generated",
+            )
+        )
+
+        self.assertEqual(message_id, "mid")
+        self.assertEqual(http.payload["card"]["header"]["title"]["content"], "深度读完包")
+        rendered = "\n".join(
+            element["text"]["content"]
+            for element in http.payload["card"]["elements"]
+            if element.get("tag") == "div"
+        )
+        self.assertIn("深度读完包", rendered)
+        self.assertIn("机器归档", rendered)
 
     def test_send_retries_lark_frequency_limit_then_succeeds(self):
         sleeps = []
@@ -195,12 +230,13 @@ class LarkTests(unittest.TestCase):
             webhook_secret="",
             http=http,
             retry_base_seconds=0.5,
+            rate_limit_cooldown_seconds=30,
             sleeper=sleeps.append,
         )
 
         self.assertEqual(client.send_text("hello"), "mid-after-retry")
         self.assertEqual(http.calls, 2)
-        self.assertEqual(sleeps, [0.5])
+        self.assertEqual(sleeps, [30])
 
     def test_send_stops_after_three_temporary_failures(self):
         sleeps = []
