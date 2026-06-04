@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import json
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from app.config import Settings
@@ -14,13 +16,16 @@ from app.feedback import (
     FEEDBACK_REASONS,
     FEEDBACK_TYPES,
     build_feedback_url,
+    build_guided_reading_day_url,
     build_reading_pack_url,
     sign_feedback,
     sign_feedback_free_text,
     verify_feedback_free_text_signature,
     verify_feedback_signature,
+    verify_guided_reading_day_signature,
     verify_reading_pack_signature,
 )
+from app.guided_reading import GuidedReadingError, GuidedReadingService
 from app.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -38,6 +43,18 @@ class FeedbackHandler(BaseHTTPRequestHandler):
         if parsed.path == "/reading-pack":
             self._handle_reading_pack(parse_qs(parsed.query))
             return
+        if parsed.path == "/guided-reading":
+            self._handle_guided_reading(parse_qs(parsed.query))
+            return
+        if parsed.path == "/guided-reading/plans":
+            self._handle_guided_reading_plans(parse_qs(parsed.query))
+            return
+        if parsed.path == "/guided-reading/sources":
+            self._handle_guided_reading_sources(parse_qs(parsed.query))
+            return
+        if parsed.path == "/guided-reading/source":
+            self._handle_guided_reading_source_detail(parse_qs(parsed.query))
+            return
         if parsed.path != "/feedback":
             self._write_text(404, "Not Found")
             return
@@ -45,6 +62,18 @@ class FeedbackHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/guided-reading/feedback":
+            self._handle_guided_reading_feedback_submission()
+            return
+        if parsed.path == "/guided-reading/plans":
+            self._handle_guided_reading_plan_submission()
+            return
+        if parsed.path == "/guided-reading/sources/upload":
+            self._handle_guided_reading_source_upload()
+            return
+        if parsed.path == "/guided-reading/sources/delete":
+            self._handle_guided_reading_source_delete()
+            return
         if parsed.path == "/feedback/inline":
             self._handle_inline_feedback_submission()
             return
@@ -112,6 +141,292 @@ class FeedbackHandler(BaseHTTPRequestHandler):
                 self._write_text(404, "快读包不存在")
                 return
             self._write_html(200, _reading_pack_page(self.settings, row, _one(query, "module") or "overview"))
+        finally:
+            conn.close()
+
+    def _handle_guided_reading(self, query: dict[str, list[str]]) -> None:
+        raw_id = _one(query, "day_id")
+        token = _one(query, "token") or ""
+        try:
+            plan_day_id = int(raw_id)
+        except (TypeError, ValueError):
+            self._write_text(400, "参数错误")
+            return
+        if not verify_guided_reading_day_signature(plan_day_id, token, self.settings.feedback_secret):
+            self._write_text(403, "签名无效")
+            return
+
+        conn = connect(self.settings.database_path)
+        try:
+            init_db(conn)
+            repo = Repository(conn)
+            row = repo.get_guided_reading_day_page(plan_day_id)
+            if row is None:
+                self._write_text(404, "导读不存在")
+                return
+            days = repo.reading_plan_days(int(row["plan_id"]))
+            repo.add_reading_progress_event(
+                int(row["plan_id"]),
+                plan_day_id,
+                "opened",
+                {"day_number": int(row["day_number"])},
+            )
+            self._write_html(200, _guided_reading_day_page(self.settings, row, days))
+        finally:
+            conn.close()
+
+    def _handle_guided_reading_plans(self, query: dict[str, list[str]]) -> None:
+        admin_token = _one(query, "admin_token") or ""
+        if not _verify_admin_token(admin_token, self.settings.feedback_secret):
+            self._write_text(403, "签名无效")
+            return
+        conn = connect(self.settings.database_path)
+        try:
+            init_db(conn)
+            repo = Repository(conn)
+            plans = repo.list_reading_plans()
+            self._write_html(200, _guided_reading_plans_page(self.settings, plans, admin_token))
+        finally:
+            conn.close()
+
+    def _handle_guided_reading_sources(self, query: dict[str, list[str]]) -> None:
+        admin_token = _one(query, "admin_token") or ""
+        if not _verify_admin_token(admin_token, self.settings.feedback_secret):
+            self._write_text(403, "签名无效")
+            return
+        conn = connect(self.settings.database_path)
+        try:
+            init_db(conn)
+            repo = Repository(conn)
+            sources = repo.list_reading_source_files()
+            self._write_html(200, _guided_reading_sources_page(self.settings, sources, admin_token))
+        finally:
+            conn.close()
+
+    def _handle_guided_reading_source_detail(self, query: dict[str, list[str]]) -> None:
+        admin_token = _one(query, "admin_token") or ""
+        if not _verify_admin_token(admin_token, self.settings.feedback_secret):
+            self._write_text(403, "签名无效")
+            return
+        try:
+            source_file_id = int(_one(query, "id") or "")
+        except ValueError:
+            self._write_text(400, "参数错误")
+            return
+        conn = connect(self.settings.database_path)
+        try:
+            init_db(conn)
+            repo = Repository(conn)
+            row = repo.get_reading_source_file(source_file_id)
+            if row is None:
+                self._write_text(404, "书源不存在")
+                return
+            preview = ""
+            try:
+                preview = Path(row["stored_path"]).read_text(encoding="utf-8")[:12000]
+            except OSError:
+                preview = ""
+            self._write_html(200, _guided_reading_source_detail_page(self.settings, row, preview, admin_token))
+        finally:
+            conn.close()
+
+    def _handle_guided_reading_source_upload(self) -> None:
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            self._write_text(400, "请使用 multipart/form-data 上传")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._write_text(400, "参数错误")
+            return
+        if length <= 0 or length > 12 * 1024 * 1024:
+            self._write_text(400, "上传过大，v1 限制 10MB 文件")
+            return
+        raw = self.rfile.read(length)
+        try:
+            fields, files = _parse_multipart_form(raw, content_type)
+        except ValueError as exc:
+            self._write_text(400, str(exc))
+            return
+        admin_token = fields.get("admin_token", "")
+        if not _verify_admin_token(admin_token, self.settings.feedback_secret):
+            self._write_text(403, "签名无效")
+            return
+        title = fields.get("title", "").strip()
+        author = fields.get("author", "").strip()
+        upload = files.get("source_file")
+        if not title or upload is None:
+            self._write_text(400, "书名和文件不能为空")
+            return
+        filename, file_bytes = upload
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".md", ".txt", ".epub"}:
+            self._write_text(400, "v1 只支持 .md / .txt / .epub")
+            return
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = Path(tmp.name)
+        conn = connect(self.settings.database_path)
+        try:
+            init_db(conn)
+            repo = Repository(conn)
+            try:
+                source_id = GuidedReadingService(repo, library_dir=Path(getattr(self.settings, "reading_pack_library_dir", None) or "library")).import_source_file(
+                    tmp_path,
+                    title=title,
+                    author=author,
+                    original_filename=filename,
+                )
+            except GuidedReadingError as exc:
+                self._write_text(400, str(exc))
+                return
+            url = f"{self.settings.public_base_url.rstrip()}/guided-reading/source?{urlencode({'id': source_id, 'admin_token': admin_token})}"
+            self._write_html(200, _guided_reading_source_uploaded_page(url, source_id))
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            conn.close()
+
+    def _handle_guided_reading_source_delete(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._write_text(400, "参数错误")
+            return
+        raw = self.rfile.read(min(length, 8192)).decode("utf-8", errors="replace")
+        form = parse_qs(raw)
+        admin_token = _one(form, "admin_token") or ""
+        if not _verify_admin_token(admin_token, self.settings.feedback_secret):
+            self._write_text(403, "签名无效")
+            return
+        try:
+            source_file_id = int(_one(form, "source_file_id") or "")
+        except ValueError:
+            self._write_text(400, "参数错误")
+            return
+        conn = connect(self.settings.database_path)
+        try:
+            init_db(conn)
+            repo = Repository(conn)
+            if not repo.mark_reading_source_file_deleted(source_file_id):
+                self._write_text(404, "书源不存在")
+                return
+            url = f"{self.settings.public_base_url.rstrip()}/guided-reading/sources?{urlencode({'admin_token': admin_token})}"
+            self._write_html(200, _redirect_like_page("书源已删除", url, "回到书源管理"))
+        finally:
+            conn.close()
+
+    def _handle_guided_reading_plan_submission(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._write_text(400, "参数错误")
+            return
+        raw = self.rfile.read(min(length, 1024 * 1024)).decode("utf-8", errors="replace")
+        form = parse_qs(raw)
+        admin_token = _one(form, "admin_token") or ""
+        if not _verify_admin_token(admin_token, self.settings.feedback_secret):
+            self._write_text(403, "签名无效")
+            return
+        title = (_one(form, "title") or "").strip()
+        author = (_one(form, "author") or "").strip()
+        source_text = (_one(form, "source_text") or "").strip()
+        raw_source_file_id = _one(form, "source_file_id") or ""
+        mode = _one(form, "mode") or "guided"
+        tone = _one(form, "tone") or "short_video"
+        spoiler_policy = _one(form, "spoiler_policy") or "avoid"
+        lark_push_enabled = (_one(form, "lark_push_enabled") or "") == "1"
+        try:
+            plan_days = int(_one(form, "plan_days") or "5")
+            daily_minutes = int(_one(form, "daily_minutes") or "8")
+        except ValueError:
+            self._write_text(400, "参数错误")
+            return
+        if not title:
+            self._write_text(400, "书名不能为空")
+            return
+
+        conn = connect(self.settings.database_path)
+        try:
+            init_db(conn)
+            repo = Repository(conn)
+            try:
+                service = GuidedReadingService(repo, library_dir=Path(getattr(self.settings, "reading_pack_library_dir", None) or "library"))
+                if raw_source_file_id:
+                    result = service.create_plan_from_source_file(
+                        source_file_id=int(raw_source_file_id),
+                        plan_days=plan_days,
+                        daily_minutes=daily_minutes,
+                        mode=mode,
+                        tone=tone,
+                        spoiler_policy=spoiler_policy,
+                        lark_push_enabled=lark_push_enabled,
+                    )
+                else:
+                    result = service.create_plan_from_text(
+                        source_text=source_text,
+                        title=title,
+                        author=author,
+                        plan_days=plan_days,
+                        daily_minutes=daily_minutes,
+                        mode=mode,
+                        tone=tone,
+                        spoiler_policy=spoiler_policy,
+                        lark_push_enabled=lark_push_enabled,
+                    )
+            except GuidedReadingError as exc:
+                self._write_text(400, str(exc))
+                return
+            url = build_guided_reading_day_url(self.settings.public_base_url, result.first_day_id, self.settings.feedback_secret)
+            self._write_html(200, _guided_reading_plan_created_page(url, result.plan_id))
+        finally:
+            conn.close()
+
+    def _handle_guided_reading_feedback_submission(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._write_text(400, "参数错误")
+            return
+        raw = self.rfile.read(min(length, 8192)).decode("utf-8", errors="replace")
+        form = parse_qs(raw)
+        raw_day_id = _one(form, "day_id")
+        token = _one(form, "token") or ""
+        event_type = _one(form, "event_type") or ""
+        note = (_one(form, "note") or "").strip()[:MAX_FREE_TEXT_LENGTH]
+        try:
+            plan_day_id = int(raw_day_id)
+        except (TypeError, ValueError):
+            self._write_text(400, "参数错误")
+            return
+        if event_type not in {"too_long", "not_interested", "just_right", "continue", "completed"}:
+            self._write_text(400, "反馈类型无效")
+            return
+        if not verify_guided_reading_day_signature(plan_day_id, token, self.settings.feedback_secret):
+            self._write_text(403, "签名无效")
+            return
+
+        conn = connect(self.settings.database_path)
+        try:
+            init_db(conn)
+            repo = Repository(conn)
+            row = repo.get_guided_reading_day_page(plan_day_id)
+            if row is None:
+                self._write_text(404, "导读不存在")
+                return
+            if event_type == "completed":
+                repo.mark_reading_plan_day_completed(plan_day_id)
+            repo.add_reading_progress_event(
+                int(row["plan_id"]),
+                plan_day_id,
+                event_type,
+                {"note": note, "day_number": int(row["day_number"])},
+            )
+            return_url = build_guided_reading_day_url(self.settings.public_base_url, plan_day_id, self.settings.feedback_secret)
+            self._write_html(200, _guided_reading_feedback_saved_page(return_url, event_type))
         finally:
             conn.close()
 
@@ -701,6 +1016,422 @@ def _inline_feedback_saved_page(return_url: str, feedback_id: int) -> str:
         "</body>"
         "</html>"
     )
+
+
+def _guided_reading_day_page(settings: Settings, row, days) -> str:
+    content = _json_loads(row["content_json"], {})
+    plan_day_id = int(row["id"])
+    token_url = build_guided_reading_day_url(settings.public_base_url, plan_day_id, settings.feedback_secret)
+    token = _one(parse_qs(urlparse(token_url).query), "token") or ""
+    day_number = int(row["day_number"])
+    total_days = int(row["plan_days"])
+    source_text = row["source_text"] or ""
+    mode = row["mode"] or "guided"
+    is_drama = mode == "drama" or row["tone"] == "drama"
+    title = f"{row['book_title']} Day {day_number} 导读"
+    progress_width = round((day_number / max(1, total_days)) * 100, 1)
+    day_links = []
+    for day in days:
+        day_id = int(day["id"])
+        active = " active" if day_id == plan_day_id else ""
+        url = build_guided_reading_day_url(settings.public_base_url, day_id, settings.feedback_secret)
+        day_links.append(
+            f'<a class="day-pill{active}" href="{escape(url, quote=True)}">Day {int(day["day_number"])}</a>'
+        )
+    feedback = _guided_reading_feedback_panel(plan_day_id, token)
+    key_points = "".join(f"<li>{escape(str(item))}</li>" for item in content.get("key_points", []))
+    source_paragraphs = "".join(f'<p class="source-p">{escape(part)}</p>' for part in _text_paragraphs(source_text))
+    spoiler_badge = '<span class="badge">不剧透已开启</span>' if is_drama and row["spoiler_policy"] == "avoid" else ""
+    drama_panel = ""
+    if is_drama:
+        drama_panel = (
+            '<section class="episode-panel">'
+            "<h2>追剧式续上</h2>"
+            f"<p>{escape(content.get('why_it_matters', ''))}</p>"
+            f"<p><strong>今天只盯一个变化：</strong>{escape(content.get('one_question', ''))}</p>"
+            "</section>"
+        )
+    return (
+        "<!doctype html>"
+        '<html lang="zh-CN">'
+        "<head>"
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{escape(title)}</title>"
+        "<style>"
+        ":root{--paper:#fffdf8;--canvas:#f1eee7;--ink:#24251f;--muted:#706d63;--line:#ddd5c8;--accent:#3f635c;--accent-soft:#e3ece8;--amber:#8a6b3d;--rose:#8f5f58;}"
+        "*{box-sizing:border-box;}html,body{max-width:100%;overflow-x:hidden;}body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--canvas);color:var(--ink);}"
+        ".wrap{width:100%;max-width:980px;margin:0 auto;padding:20px 16px 64px;}"
+        ".top{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;margin:6px 0 16px;}"
+        ".kicker{margin:0 0 6px;color:var(--accent);font-size:13px;font-weight:700;}"
+        "h1{margin:0;font-size:28px;line-height:1.22;letter-spacing:0;}.meta{margin:8px 0 0;color:var(--muted);font-size:14px;line-height:1.5;}"
+        ".badge{display:inline-flex;align-items:center;white-space:nowrap;padding:7px 9px;border:1px solid #c7bda9;border-radius:999px;background:var(--paper);color:var(--amber);font-size:12px;}"
+        ".progress{height:8px;border:1px solid var(--line);border-radius:999px;background:#e7dfd2;margin:0 0 14px;overflow:hidden;}.bar{display:block;height:100%;background:var(--accent);}"
+        ".days{display:flex;gap:8px;overflow-x:auto;padding:0 0 8px;margin:0 0 18px;-webkit-overflow-scrolling:touch;}.day-pill{padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:rgba(255,253,248,.78);color:var(--accent);font-size:13px;text-decoration:none;white-space:nowrap;}.day-pill.active{background:var(--accent);border-color:var(--accent);color:#fff;}"
+        ".hero{padding:22px;border:1px solid var(--line);border-radius:8px;background:var(--paper);box-shadow:0 14px 34px rgba(69,57,37,.07);}.hero h2{margin:0 0 12px;font-size:22px;line-height:1.28;}.hero p{margin:0;color:#3e433b;font-size:17px;line-height:1.72;}"
+        ".actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:16px;}.button{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:10px 13px;border:1px solid var(--accent);border-radius:7px;background:var(--accent);color:#fff;text-decoration:none;font-size:14px;}.button.secondary{background:var(--paper);color:var(--accent);}"
+        ".grid{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:18px;margin-top:18px;align-items:start;}.main{min-width:0;}.side{position:sticky;top:14px;min-width:0;}"
+        ".panel{margin:0 0 14px;padding:18px;border:1px solid var(--line);border-radius:8px;background:rgba(255,253,248,.84);box-shadow:0 8px 24px rgba(69,57,37,.045);}.panel h2,.episode-panel h2{margin:0 0 10px;font-size:18px;line-height:1.35;}.panel p,.panel li,.episode-panel p{font-size:16px;line-height:1.75;color:#3f413a;}.panel p{margin:0 0 10px;}.panel p:last-child{margin-bottom:0;}ol,ul{padding-left:22px;margin:8px 0 0;}li+li{margin-top:8px;}"
+        ".question{border-left:4px solid var(--accent);}.source-box{padding:0;overflow:hidden;}.source-head{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:16px 18px;border-bottom:1px solid var(--line);}.source-head h2{margin:0;font-size:18px;}.source-content{padding:18px;background:#fffdf8;}.source-p{margin:0 0 14px;font-size:17px;line-height:1.86;color:#262820;}.source-p:last-child{margin-bottom:0;}"
+        "details.source-details summary{cursor:pointer;list-style:none;color:var(--accent);font-size:14px;}details.source-details summary::-webkit-details-marker{display:none;}"
+        ".episode-panel{margin:0 0 14px;padding:18px;border:1px solid #d8cbb7;border-radius:8px;background:#f9f1df;}"
+        ".feedback-card{padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--paper);}.feedback-card h2{margin:0 0 8px;font-size:16px;}.feedback-card p{margin:0 0 10px;color:var(--muted);font-size:13px;line-height:1.55;}.feedback-card textarea{width:100%;min-height:68px;resize:vertical;padding:9px;border:1px solid var(--line);border-radius:7px;background:#fffefb;color:var(--ink);font-size:13px;line-height:1.5;}.feedback-buttons{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:9px;}.feedback-buttons button{min-height:38px;border:1px solid #c9bdab;border-radius:7px;background:var(--accent-soft);color:#294640;font-size:13px;}.feedback-buttons button.primary{background:var(--accent);border-color:var(--accent);color:#fff;}"
+        "@media(max-width:820px){.grid{display:block;}.side{position:static;margin-top:16px;}.hero{padding:20px 18px;}.hero h2{font-size:21px;}.feedback-buttons{grid-template-columns:1fr;}}"
+        "@media(max-width:560px){.wrap{padding:16px 13px 52px;}.top{display:block;}h1{font-size:24px;}.badge{margin-top:10px;}.hero p,.source-p{font-size:16px;}.panel{padding:16px;}.actions{display:block;}.button{width:100%;margin-top:8px;}.source-head{display:block;}.source-head details{margin-top:8px;}}"
+        "</style>"
+        "</head>"
+        "<body>"
+        '<main class="wrap">'
+        '<header class="top"><div>'
+        f'<p class="kicker">Day {day_number}/{total_days} · 约 {int(row["estimated_minutes"])} 分钟</p>'
+        f"<h1>{escape(row['book_title'])}</h1>"
+        f'<p class="meta">{escape(row["book_author"] or "未知作者")} · {escape(row["mode"])} · {escape(row["tone"])} · artifact: {escape(row["artifact_path"] or "")}</p>'
+        f"</div>{spoiler_badge}</header>"
+        f'<div class="progress" aria-label="计划进度"><span class="bar" style="width:{progress_width}%"></span></div>'
+        f'<nav class="days" aria-label="阅读天数">{"".join(day_links)}</nav>'
+        '<section class="hero">'
+        "<h2>今日钩子</h2>"
+        f"<p>{escape(content.get('hook', '今天只读这一小段。'))}</p>"
+        '<div class="actions"><a class="button" href="#source">开始读这一小段</a><a class="button secondary" href="#explain">先看白话拆解</a></div>'
+        "</section>"
+        '<div class="grid"><article class="main">'
+        f"{drama_panel}"
+        '<section class="panel question">'
+        "<h2>今天只抓一个问题</h2>"
+        f"<p>{escape(content.get('one_question', '这段到底在解决什么问题？'))}</p>"
+        "</section>"
+        '<section id="source" class="panel source-box">'
+        '<div class="source-head"><h2>今日原文</h2><details class="source-details"><summary>阅读提示</summary><p>先读完，不用记笔记。读不进去就回到导读。</p></details></div>'
+        f'<div class="source-content">{source_paragraphs}</div>'
+        "</section>"
+        '<section id="explain" class="panel">'
+        "<h2>白话拆解</h2>"
+        f"<p>{escape(content.get('plain_explanation', ''))}</p>"
+        "</section>"
+        '<section class="panel">'
+        "<h2>关键点</h2>"
+        f"<ul>{key_points}</ul>"
+        "</section>"
+        '<section class="panel">'
+        "<h2>现实连接</h2>"
+        f"<p>{escape(content.get('reality_connection', ''))}</p>"
+        "</section>"
+        '<section class="panel">'
+        "<h2>明天预告</h2>"
+        f"<p>{escape(content.get('tomorrow_teaser', ''))}</p>"
+        "</section>"
+        '</article><aside class="side">'
+        f"{feedback}"
+        "</aside></div>"
+        "</main>"
+        "</body>"
+        "</html>"
+    )
+
+
+def _guided_reading_feedback_panel(plan_day_id: int, token: str) -> str:
+    buttons = [
+        ("completed", "读完了", "primary"),
+        ("continue", "想继续", ""),
+        ("just_right", "刚刚好", ""),
+        ("too_long", "太长了", ""),
+        ("not_interested", "没兴趣", ""),
+    ]
+    button_html = "".join(
+        f'<button class="{css}" type="submit" name="event_type" value="{event}">{label}</button>'
+        for event, label, css in buttons
+    )
+    return (
+        '<section class="feedback-card">'
+        "<h2>今天的反馈</h2>"
+        "<p>点一下就够。系统后续会用它调节明天的长度和口吻。</p>"
+        '<form method="post" action="/guided-reading/feedback">'
+        f'<input type="hidden" name="day_id" value="{plan_day_id}">'
+        f'<input type="hidden" name="token" value="{escape(token, quote=True)}">'
+        f'<textarea name="note" maxlength="{MAX_FREE_TEXT_LENGTH}" placeholder="可选：补一句哪里卡住了"></textarea>'
+        f'<div class="feedback-buttons">{button_html}</div>'
+        "</form>"
+        "</section>"
+    )
+
+
+def _guided_reading_feedback_saved_page(return_url: str, event_type: str) -> str:
+    labels = {
+        "too_long": "太长了",
+        "not_interested": "没兴趣",
+        "just_right": "刚刚好",
+        "continue": "想继续",
+        "completed": "读完了",
+    }
+    return (
+        "<!doctype html>"
+        '<html lang="zh-CN">'
+        "<head>"
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>导读反馈已记录</title>"
+        "<style>"
+        ":root{--paper:#fffdf8;--canvas:#f1eee7;--ink:#24251f;--muted:#706d63;--line:#ddd5c8;--accent:#3f635c;}"
+        "body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--canvas);color:var(--ink);}"
+        ".wrap{max-width:560px;margin:0 auto;padding:28px 18px;}h1{font-size:24px;margin:0 0 10px;}p{font-size:15px;line-height:1.65;color:var(--muted);}a{display:inline-block;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--accent);text-decoration:none;}"
+        "</style>"
+        "</head>"
+        "<body>"
+        '<main class="wrap">'
+        "<h1>导读反馈已记录</h1>"
+        f"<p>这次反馈是：{escape(labels.get(event_type, event_type))}。</p>"
+        f'<a href="{escape(return_url, quote=True)}">回到今日导读</a>'
+        "</main>"
+        "</body>"
+        "</html>"
+    )
+
+
+def _guided_reading_plans_page(settings: Settings, plans, admin_token: str) -> str:
+    rows = []
+    for plan in plans:
+        lark = "开" if int(plan["lark_push_enabled"] or 0) else "关"
+        rows.append(
+            "<tr>"
+            f"<td>{int(plan['id'])}</td>"
+            f"<td>{escape(plan['book_title'])}</td>"
+            f"<td>{escape(plan['mode'])} / {escape(plan['tone'])}</td>"
+            f"<td>{int(plan['plan_days'])} 天 · {int(plan['daily_minutes'])} 分钟</td>"
+            f"<td>{lark}</td>"
+            f"<td>{escape(plan['status'])}</td>"
+            "</tr>"
+        )
+    table = "".join(rows) or '<tr><td colspan="6">暂无阅读计划</td></tr>'
+    action = f"{settings.public_base_url.rstrip('/')}/guided-reading/plans"
+    return (
+        "<!doctype html>"
+        '<html lang="zh-CN">'
+        "<head>"
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>导读计划配置</title>"
+        "<style>"
+        ":root{--paper:#fffdf8;--canvas:#f1eee7;--ink:#24251f;--muted:#706d63;--line:#ddd5c8;--accent:#3f635c;--accent-soft:#e3ece8;}"
+        "*{box-sizing:border-box;}body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--canvas);color:var(--ink);}.wrap{max-width:980px;margin:0 auto;padding:24px 16px 56px;}h1{margin:0 0 16px;font-size:28px;}.grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:18px;align-items:start;}.panel{padding:18px;border:1px solid var(--line);border-radius:8px;background:var(--paper);box-shadow:0 10px 28px rgba(69,57,37,.055);}h2{margin:0 0 12px;font-size:18px;}label{display:block;margin:12px 0 6px;color:var(--muted);font-size:13px;}input,textarea,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:7px;background:#fffefb;color:var(--ink);font-size:14px;}textarea{min-height:220px;resize:vertical;line-height:1.55;}button{margin-top:14px;width:100%;min-height:42px;border:1px solid var(--accent);border-radius:7px;background:var(--accent);color:#fff;font-size:14px;}table{width:100%;border-collapse:collapse;font-size:14px;}th,td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;}th{color:var(--muted);font-weight:600;}.two{display:grid;grid-template-columns:1fr 1fr;gap:10px;}.check{display:flex;gap:8px;align-items:center;margin-top:12px;color:var(--ink);}.check input{width:auto;}@media(max-width:820px){.grid{display:block;}.panel{margin-bottom:16px;}.two{grid-template-columns:1fr;}table{display:block;overflow-x:auto;white-space:nowrap;}}"
+        "</style>"
+        "</head>"
+        "<body>"
+        '<main class="wrap">'
+        "<h1>导读计划配置</h1>"
+        f'<p><a href="{escape(settings.public_base_url.rstrip() + "/guided-reading/sources?" + urlencode({"admin_token": admin_token}), quote=True)}">进入书源管理</a></p>'
+        '<div class="grid">'
+        '<section class="panel"><h2>已有计划</h2><table><thead><tr><th>ID</th><th>书</th><th>模式</th><th>计划</th><th>飞书</th><th>状态</th></tr></thead><tbody>'
+        f"{table}"
+        "</tbody></table></section>"
+        '<section class="panel"><h2>创建计划</h2>'
+        f'<form method="post" action="{escape(action, quote=True)}">'
+        f'<input type="hidden" name="admin_token" value="{escape(admin_token, quote=True)}">'
+        '<label>书名</label><input name="title" required>'
+        '<label>作者</label><input name="author">'
+        '<div class="two"><div><label>计划天数</label><input name="plan_days" type="number" min="1" max="60" value="5"></div><div><label>每天分钟</label><input name="daily_minutes" type="number" min="1" max="180" value="8"></div></div>'
+        '<div class="two"><div><label>模式</label><select name="mode"><option value="guided">渐进导读</option><option value="drama">追剧式</option><option value="fast_intro">轻速览</option><option value="deep_read">深读</option></select></div><div><label>口吻</label><select name="tone"><option value="short_video">短导读</option><option value="drama">追剧式</option><option value="coach">私教式</option><option value="deep">深读式</option></select></div></div>'
+        '<label>剧透策略</label><select name="spoiler_policy"><option value="avoid">不剧透</option><option value="allow">允许剧透</option></select>'
+        '<label class="check"><input type="checkbox" name="lark_push_enabled" value="1"> 飞书推送每日导读</label>'
+        '<label>书源文本（Markdown / TXT）</label><textarea name="source_text" required></textarea>'
+        "<button type=\"submit\">创建阅读计划</button>"
+        "</form></section>"
+        "</div>"
+        "</main>"
+        "</body>"
+        "</html>"
+    )
+
+
+def _guided_reading_sources_page(settings: Settings, sources, admin_token: str) -> str:
+    rows = []
+    for source in sources:
+        detail_url = f"{settings.public_base_url.rstrip()}/guided-reading/source?{urlencode({'id': int(source['id']), 'admin_token': admin_token})}"
+        rows.append(
+            "<tr>"
+            f"<td>{int(source['id'])}</td>"
+            f"<td><a href=\"{escape(detail_url, quote=True)}\">{escape(source['title'])}</a></td>"
+            f"<td>{escape(source['original_filename'])}</td>"
+            f"<td>{escape(source['file_format'])}</td>"
+            f"<td>{int(source['char_count'])}</td>"
+            f"<td>{escape(source['created_at'])}</td>"
+            "</tr>"
+        )
+    table = "".join(rows) or '<tr><td colspan="6">暂无导入书源</td></tr>'
+    action = f"{settings.public_base_url.rstrip()}/guided-reading/sources/upload"
+    plans_url = f"{settings.public_base_url.rstrip()}/guided-reading/plans?{urlencode({'admin_token': admin_token})}"
+    return (
+        "<!doctype html>"
+        '<html lang="zh-CN">'
+        "<head>"
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>书源管理</title>"
+        "<style>"
+        ":root{--paper:#fffdf8;--canvas:#f1eee7;--ink:#24251f;--muted:#706d63;--line:#ddd5c8;--accent:#3f635c;--accent-soft:#e3ece8;}*{box-sizing:border-box;}body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--canvas);color:var(--ink);}.wrap{max-width:1040px;margin:0 auto;padding:24px 16px 56px;}h1{margin:0 0 10px;font-size:28px;}a{color:var(--accent);}.grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start;}.panel{padding:18px;border:1px solid var(--line);border-radius:8px;background:var(--paper);box-shadow:0 10px 28px rgba(69,57,37,.055);}h2{margin:0 0 12px;font-size:18px;}label{display:block;margin:12px 0 6px;color:var(--muted);font-size:13px;}input{width:100%;padding:10px;border:1px solid var(--line);border-radius:7px;background:#fffefb;color:var(--ink);font-size:14px;}button{margin-top:14px;width:100%;min-height:42px;border:1px solid var(--accent);border-radius:7px;background:var(--accent);color:#fff;font-size:14px;}table{width:100%;border-collapse:collapse;font-size:14px;}th,td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;}th{color:var(--muted);font-weight:600;}.note{margin:0 0 16px;color:var(--muted);font-size:14px;line-height:1.6;}@media(max-width:820px){.grid{display:block;}.panel{margin-bottom:16px;}table{display:block;overflow-x:auto;white-space:nowrap;}}"
+        "</style>"
+        "</head>"
+        "<body>"
+        '<main class="wrap">'
+        "<h1>书源管理</h1>"
+        f'<p class="note"><a href="{escape(plans_url, quote=True)}">返回导读计划</a> · v1 支持 UTF-8 .md / .txt 和 .epub，单文件 10MB 以内。</p>'
+        '<div class="grid">'
+        '<section class="panel"><h2>已导入书源</h2><table><thead><tr><th>ID</th><th>书名</th><th>文件</th><th>格式</th><th>字数</th><th>导入时间</th></tr></thead><tbody>'
+        f"{table}"
+        "</tbody></table></section>"
+        '<section class="panel"><h2>上传书源</h2>'
+        f'<form method="post" action="{escape(action, quote=True)}" enctype="multipart/form-data">'
+        f'<input type="hidden" name="admin_token" value="{escape(admin_token, quote=True)}">'
+        '<label>书名</label><input name="title" required>'
+        '<label>作者</label><input name="author">'
+        '<label>文件</label><input name="source_file" type="file" accept=".md,.txt,.epub,text/plain,text/markdown,application/epub+zip" required>'
+        "<button type=\"submit\">导入书源</button>"
+        "</form></section>"
+        "</div>"
+        "</main>"
+        "</body>"
+        "</html>"
+    )
+
+
+def _guided_reading_source_detail_page(settings: Settings, row, preview: str, admin_token: str) -> str:
+    create_action = f"{settings.public_base_url.rstrip()}/guided-reading/plans"
+    delete_action = f"{settings.public_base_url.rstrip()}/guided-reading/sources/delete"
+    sources_url = f"{settings.public_base_url.rstrip()}/guided-reading/sources?{urlencode({'admin_token': admin_token})}"
+    return (
+        "<!doctype html>"
+        '<html lang="zh-CN">'
+        "<head>"
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{escape(row['title'])} 书源</title>"
+        "<style>"
+        ":root{--paper:#fffdf8;--canvas:#f1eee7;--ink:#24251f;--muted:#706d63;--line:#ddd5c8;--accent:#3f635c;--danger:#8f5f58;}*{box-sizing:border-box;}body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--canvas);color:var(--ink);}.wrap{max-width:980px;margin:0 auto;padding:24px 16px 56px;}h1{margin:0 0 8px;font-size:28px;}.meta{margin:0 0 16px;color:var(--muted);font-size:14px;line-height:1.6;}a{color:var(--accent);}.grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:18px;align-items:start;}.panel{padding:18px;border:1px solid var(--line);border-radius:8px;background:var(--paper);box-shadow:0 10px 28px rgba(69,57,37,.055);}pre{white-space:pre-wrap;word-break:break-word;margin:0;font-size:15px;line-height:1.72;}label{display:block;margin:12px 0 6px;color:var(--muted);font-size:13px;}input,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:7px;background:#fffefb;color:var(--ink);font-size:14px;}button{margin-top:14px;width:100%;min-height:42px;border:1px solid var(--accent);border-radius:7px;background:var(--accent);color:#fff;font-size:14px;}.danger{border-color:var(--danger);background:#fff7f5;color:var(--danger);}@media(max-width:820px){.grid{display:block;}.panel{margin-bottom:16px;}}"
+        "</style>"
+        "</head>"
+        "<body>"
+        '<main class="wrap">'
+        f"<h1>{escape(row['title'])}</h1>"
+        f'<p class="meta"><a href="{escape(sources_url, quote=True)}">返回书源管理</a> · {escape(row["original_filename"])} · {escape(row["file_format"])} · {int(row["char_count"])} 字</p>'
+        '<div class="grid">'
+        f'<section class="panel"><h2>内容预览</h2><pre>{escape(preview)}</pre></section>'
+        '<aside class="panel"><h2>基于此书源创建计划</h2>'
+        f'<form method="post" action="{escape(create_action, quote=True)}">'
+        f'<input type="hidden" name="admin_token" value="{escape(admin_token, quote=True)}">'
+        f'<input type="hidden" name="source_file_id" value="{int(row["id"])}">'
+        f'<input type="hidden" name="title" value="{escape(row["title"], quote=True)}">'
+        f'<input type="hidden" name="author" value="{escape(row["author"] or "", quote=True)}">'
+        '<label>计划天数</label><input name="plan_days" type="number" min="1" max="60" value="5">'
+        '<label>每天分钟</label><input name="daily_minutes" type="number" min="1" max="180" value="8">'
+        '<label>模式</label><select name="mode"><option value="guided">渐进导读</option><option value="drama">追剧式</option><option value="fast_intro">轻速览</option><option value="deep_read">深读</option></select>'
+        '<label>口吻</label><select name="tone"><option value="short_video">短导读</option><option value="drama">追剧式</option><option value="coach">私教式</option><option value="deep">深读式</option></select>'
+        '<label>剧透策略</label><select name="spoiler_policy"><option value="avoid">不剧透</option><option value="allow">允许剧透</option></select>'
+        '<label><input type="checkbox" name="lark_push_enabled" value="1"> 飞书推送每日导读</label>'
+        "<button type=\"submit\">创建阅读计划</button>"
+        "</form>"
+        f'<form method="post" action="{escape(delete_action, quote=True)}">'
+        f'<input type="hidden" name="admin_token" value="{escape(admin_token, quote=True)}">'
+        f'<input type="hidden" name="source_file_id" value="{int(row["id"])}">'
+        '<button class="danger" type="submit">删除书源</button>'
+        "</form>"
+        "</aside></div>"
+        "</main>"
+        "</body>"
+        "</html>"
+    )
+
+
+def _guided_reading_source_uploaded_page(detail_url: str, source_id: int) -> str:
+    return _redirect_like_page("书源已导入", detail_url, f"查看书源 #{source_id}")
+
+
+def _redirect_like_page(title: str, url: str, label: str) -> str:
+    return (
+        "<!doctype html>"
+        '<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{escape(title)}</title>"
+        "<style>:root{--paper:#fffdf8;--canvas:#f1eee7;--ink:#24251f;--muted:#706d63;--line:#ddd5c8;--accent:#3f635c;}body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--canvas);color:var(--ink);}.wrap{max-width:560px;margin:0 auto;padding:28px 18px;}h1{font-size:24px;margin:0 0 10px;}a{display:inline-block;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--accent);text-decoration:none;}</style>"
+        "</head><body><main class=\"wrap\">"
+        f"<h1>{escape(title)}</h1>"
+        f'<a href="{escape(url, quote=True)}">{escape(label)}</a>'
+        "</main></body></html>"
+    )
+
+
+def _guided_reading_plan_created_page(first_day_url: str, plan_id: int) -> str:
+    return (
+        "<!doctype html>"
+        '<html lang="zh-CN">'
+        "<head>"
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>阅读计划已创建</title>"
+        "<style>"
+        ":root{--paper:#fffdf8;--canvas:#f1eee7;--ink:#24251f;--muted:#706d63;--line:#ddd5c8;--accent:#3f635c;}body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--canvas);color:var(--ink);}.wrap{max-width:560px;margin:0 auto;padding:28px 18px;}h1{font-size:24px;margin:0 0 10px;}p{font-size:15px;line-height:1.65;color:var(--muted);}a{display:inline-block;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--accent);text-decoration:none;}"
+        "</style>"
+        "</head>"
+        "<body>"
+        '<main class="wrap">'
+        "<h1>阅读计划已创建</h1>"
+        f"<p>plan_id={plan_id}。第一天导读已经生成。</p>"
+        f'<a href="{escape(first_day_url, quote=True)}">打开第一天导读</a>'
+        "</main>"
+        "</body>"
+        "</html>"
+    )
+
+
+def _verify_admin_token(token: str, secret: str) -> bool:
+    return bool(token and secret and token == sign_feedback_free_text(0, secret))
+
+
+def _parse_multipart_form(raw: bytes, content_type: str) -> tuple[dict[str, str], dict[str, tuple[str, bytes]]]:
+    marker = "boundary="
+    if marker not in content_type:
+        raise ValueError("multipart boundary missing")
+    boundary = content_type.split(marker, 1)[1].split(";", 1)[0].strip().strip('"')
+    if not boundary:
+        raise ValueError("multipart boundary missing")
+    delimiter = ("--" + boundary).encode("utf-8")
+    fields: dict[str, str] = {}
+    files: dict[str, tuple[str, bytes]] = {}
+    for part in raw.split(delimiter):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        if b"\r\n\r\n" not in part:
+            continue
+        header_raw, body = part.split(b"\r\n\r\n", 1)
+        body = body.rstrip(b"\r\n")
+        headers = header_raw.decode("utf-8", errors="replace")
+        disposition = ""
+        for line in headers.splitlines():
+            if line.lower().startswith("content-disposition:"):
+                disposition = line
+                break
+        name = _multipart_attr(disposition, "name")
+        filename = _multipart_attr(disposition, "filename")
+        if not name:
+            continue
+        if filename:
+            files[name] = (Path(filename).name, body)
+        else:
+            fields[name] = body.decode("utf-8", errors="replace")
+    return fields, files
+
+
+def _multipart_attr(disposition: str, key: str) -> str:
+    pattern = f'{key}="'
+    if pattern not in disposition:
+        return ""
+    start = disposition.find(pattern) + len(pattern)
+    end = disposition.find('"', start)
+    if end < 0:
+        return ""
+    return disposition[start:end]
+
+
+def _text_paragraphs(text: str) -> list[str]:
+    return [part.strip() for part in text.split("\n\n") if part.strip()] or [text.strip()]
 
 
 def _section(title: str, raw) -> str:

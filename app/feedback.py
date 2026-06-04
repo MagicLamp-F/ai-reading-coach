@@ -132,6 +132,21 @@ def verify_reading_pack_signature(reading_pack_id: int, token: str, secret: str)
     return hmac.compare_digest(expected, token)
 
 
+def sign_guided_reading_day(plan_day_id: int, secret: str) -> str:
+    if not secret:
+        raise ValueError("FEEDBACK_SECRET is required")
+    message = f"guided_reading_day:{plan_day_id}".encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def verify_guided_reading_day_signature(plan_day_id: int, token: str, secret: str) -> bool:
+    if not token or not secret:
+        return False
+    expected = sign_guided_reading_day(plan_day_id, secret)
+    return hmac.compare_digest(expected, token)
+
+
 def build_feedback_url(base_url: str, recommendation_id: int, feedback_type: str, secret: str, reason_code: str = "") -> str:
     params = {
         "recommendation_id": str(recommendation_id),
@@ -150,3 +165,11 @@ def build_reading_pack_url(base_url: str, reading_pack_id: int, secret: str) -> 
         "token": sign_reading_pack(reading_pack_id, secret),
     }
     return f"{base_url.rstrip('/')}/reading-pack?{urlencode(params)}"
+
+
+def build_guided_reading_day_url(base_url: str, plan_day_id: int, secret: str) -> str:
+    params = {
+        "day_id": str(plan_day_id),
+        "token": sign_guided_reading_day(plan_day_id, secret),
+    }
+    return f"{base_url.rstrip('/')}/guided-reading?{urlencode(params)}"

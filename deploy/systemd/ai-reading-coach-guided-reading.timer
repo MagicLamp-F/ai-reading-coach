@@ -1,0 +1,10 @@
+[Unit]
+Description=Run AI Reading Coach guided reading pushes at 08:30
+
+[Timer]
+OnCalendar=*-*-* 08:30:00
+Persistent=true
+Unit=ai-reading-coach-guided-reading.service
+
+[Install]
+WantedBy=timers.target

@@ -9,6 +9,8 @@ from threading import Thread
 from app.config import Settings
 from app.db import connect, init_db
 from app.factory import build_context
+from app.feedback import build_guided_reading_day_url
+from app.guided_reading import GuidedReadingError, GuidedReadingService
 from app.logging_setup import configure_logging
 from app.metrics import MetricsServer
 from app.poller import TelegramPoller
@@ -46,6 +48,36 @@ def main() -> None:
     reading_pack = subparsers.add_parser("generate-reading-pack", help="Generate a deep read pack for a recommendation")
     reading_pack.add_argument("--recommendation-id", type=int, required=True, help="Recommendation id")
     reading_pack.add_argument("--library-dir", default="library", help="Directory for long-form reading artifacts")
+
+    guided_plan = subparsers.add_parser("create-guided-reading-plan", help="Create a progressive guided reading plan from a Markdown/TXT source")
+    guided_plan.add_argument("--source-file", required=True, help="Path to a UTF-8 Markdown/TXT source file")
+    guided_plan.add_argument("--title", required=True, help="Book title")
+    guided_plan.add_argument("--author", default="", help="Book author")
+    guided_plan.add_argument("--days", type=int, default=5, help="Number of planned reading days")
+    guided_plan.add_argument("--daily-minutes", type=int, default=8, help="Target daily reading minutes")
+    guided_plan.add_argument(
+        "--mode",
+        choices=["guided", "fast_intro", "deep_read", "drama"],
+        default="guided",
+        help="Reading mode",
+    )
+    guided_plan.add_argument(
+        "--tone",
+        choices=["short_video", "coach", "deep", "drama"],
+        default="short_video",
+        help="Guide tone",
+    )
+    guided_plan.add_argument(
+        "--spoiler-policy",
+        choices=["avoid", "allow"],
+        default="avoid",
+        help="Spoiler policy for narrative reading",
+    )
+    guided_plan.add_argument("--library-dir", default="library", help="Directory for guided reading artifacts")
+    guided_plan.add_argument("--lark-push", action="store_true", help="Enable Lark push for this reading plan")
+
+    guided_push = subparsers.add_parser("send-guided-reading-pushes", help="Send due guided reading days to Lark")
+    guided_push.add_argument("--limit", type=int, default=10, help="Maximum guided reading day cards to send")
 
     reflection_generate = subparsers.add_parser("generate-reflection", help="Generate a Hermes reflection draft")
     reflection_generate.add_argument("--days", type=int, default=7, help="Number of recent days to reflect on")
@@ -136,6 +168,55 @@ def main() -> None:
         print(f"Deep read pack generated: id={result.reading_pack_id}")
         print(f"Status: {result.status}")
         print(f"Artifact: {result.artifact_path}")
+        return
+
+    if args.command == "create-guided-reading-plan":
+        try:
+            result = GuidedReadingService(context.repo, library_dir=Path(args.library_dir)).create_plan_from_source(
+                source_path=Path(args.source_file),
+                title=args.title,
+                author=args.author,
+                plan_days=args.days,
+                daily_minutes=args.daily_minutes,
+                mode=args.mode,
+                tone=args.tone,
+                spoiler_policy=args.spoiler_policy,
+                lark_push_enabled=args.lark_push,
+            )
+        except GuidedReadingError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Guided reading plan created: plan_id={result.plan_id}")
+        print(f"Days: {len(result.day_ids)}")
+        print(f"First day id: {result.first_day_id}")
+        if settings.feedback_secret:
+            url = build_guided_reading_day_url(settings.public_base_url, result.first_day_id, settings.feedback_secret)
+            print(f"First day: {url}")
+        else:
+            print("First day URL unavailable: FEEDBACK_SECRET is not configured")
+        return
+
+    if args.command == "send-guided-reading-pushes":
+        sent = 0
+        for row in context.repo.next_lark_push_reading_days(limit=args.limit):
+            url = build_guided_reading_day_url(settings.public_base_url, int(row["id"]), settings.feedback_secret)
+            message_id = context.lark.send_guided_reading_day(row, url)
+            if message_id is not None or not context.lark.enabled():
+                event_type = "lark_push_sent" if message_id else "lark_push_skipped_disabled"
+                context.repo.add_reading_progress_event(
+                    int(row["plan_id"]),
+                    int(row["id"]),
+                    event_type,
+                    {"message_id": message_id or ""},
+                )
+                sent += 1
+            else:
+                context.repo.add_reading_progress_event(
+                    int(row["plan_id"]),
+                    int(row["id"]),
+                    "lark_push_failed",
+                    {"error": getattr(context.lark, "last_send_error", "")},
+                )
+        print(f"Guided reading pushes processed: sent={sent}")
         return
 
     if args.command == "generate-reflection":

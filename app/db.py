@@ -207,6 +207,89 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(recommendation_id) REFERENCES recommendations(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS reading_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER NOT NULL,
+            source_artifact_id INTEGER,
+            title TEXT NOT NULL,
+            source_path TEXT NOT NULL DEFAULT '',
+            mode TEXT NOT NULL DEFAULT 'guided' CHECK(mode IN ('guided', 'fast_intro', 'deep_read', 'drama')),
+            tone TEXT NOT NULL DEFAULT 'short_video' CHECK(tone IN ('short_video', 'coach', 'deep', 'drama')),
+            spoiler_policy TEXT NOT NULL DEFAULT 'avoid' CHECK(spoiler_policy IN ('avoid', 'allow')),
+            plan_days INTEGER NOT NULL DEFAULT 5,
+            daily_minutes INTEGER NOT NULL DEFAULT 8,
+            lark_push_enabled INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'paused', 'completed', 'archived')),
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS reading_source_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER,
+            artifact_id INTEGER,
+            title TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT '',
+            original_filename TEXT NOT NULL DEFAULT '',
+            stored_path TEXT NOT NULL DEFAULT '',
+            file_format TEXT NOT NULL DEFAULT 'text',
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'deleted')),
+            char_count INTEGER NOT NULL DEFAULT 0,
+            sha256 TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE SET NULL,
+            FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS reading_plan_days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL,
+            day_number INTEGER NOT NULL,
+            scheduled_date TEXT NOT NULL DEFAULT '',
+            source_start_char INTEGER NOT NULL DEFAULT 0,
+            source_end_char INTEGER NOT NULL DEFAULT 0,
+            source_text TEXT NOT NULL DEFAULT '',
+            estimated_minutes INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'generated', 'completed', 'skipped')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(plan_id) REFERENCES reading_plans(id) ON DELETE CASCADE,
+            UNIQUE(plan_id, day_number)
+        );
+
+        CREATE TABLE IF NOT EXISTS reading_day_packs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_day_id INTEGER NOT NULL UNIQUE,
+            artifact_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'generated' CHECK(status IN ('generated', 'fallback', 'failed')),
+            route TEXT NOT NULL DEFAULT 'reading.guided_daily_pack',
+            schema_version TEXT NOT NULL DEFAULT 'guided_daily_pack_v1',
+            title TEXT NOT NULL,
+            content_json TEXT NOT NULL DEFAULT '{}',
+            generator_provider TEXT NOT NULL DEFAULT 'local-heuristic',
+            error_message TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(plan_day_id) REFERENCES reading_plan_days(id) ON DELETE CASCADE,
+            FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS reading_progress_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL,
+            plan_day_id INTEGER,
+            event_type TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(plan_id) REFERENCES reading_plans(id) ON DELETE CASCADE,
+            FOREIGN KEY(plan_day_id) REFERENCES reading_plan_days(id) ON DELETE SET NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_profile_category_weight ON profile_items(category, weight DESC, confidence DESC);
         CREATE INDEX IF NOT EXISTS idx_feedback_unprocessed ON feedback_events(processed_at);
         CREATE INDEX IF NOT EXISTS idx_recommendations_date ON recommendations(recommendation_date);
@@ -221,12 +304,18 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_recommendation_candidates_status ON recommendation_candidates(status, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_delivery_outbox_pending ON delivery_outbox(status, next_attempt_at, id);
         CREATE INDEX IF NOT EXISTS idx_delivery_outbox_recommendation ON delivery_outbox(recommendation_id, status);
+        CREATE INDEX IF NOT EXISTS idx_reading_plans_status ON reading_plans(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reading_source_files_status ON reading_source_files(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reading_plan_days_plan ON reading_plan_days(plan_id, day_number);
+        CREATE INDEX IF NOT EXISTS idx_reading_day_packs_day ON reading_day_packs(plan_day_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reading_progress_events_plan ON reading_progress_events(plan_id, created_at DESC);
         """
     )
     _ensure_column(conn, "recommendations", "system_hypothesis", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "recommendations", "profile_dimensions", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "feedback_events", "reason_code", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "run_logs", "warning_message", "TEXT")
+    _ensure_column(conn, "reading_plans", "lark_push_enabled", "INTEGER NOT NULL DEFAULT 0")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

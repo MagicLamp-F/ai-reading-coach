@@ -77,6 +77,60 @@ class DeliveryOutboxDraft:
     next_attempt_seconds: int = 0
 
 
+@dataclass(frozen=True)
+class ReadingPlanDraft:
+    book_id: int
+    source_artifact_id: int | None
+    title: str
+    source_path: str
+    mode: str
+    tone: str
+    spoiler_policy: str
+    plan_days: int
+    daily_minutes: int
+    lark_push_enabled: bool
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ReadingPlanDayDraft:
+    plan_id: int
+    day_number: int
+    scheduled_date: str
+    source_start_char: int
+    source_end_char: int
+    source_text: str
+    estimated_minutes: int
+    status: str
+
+
+@dataclass(frozen=True)
+class ReadingDayPackDraft:
+    plan_day_id: int
+    artifact_id: int | None
+    status: str
+    route: str
+    schema_version: str
+    title: str
+    content: dict[str, Any]
+    generator_provider: str
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class ReadingSourceFileDraft:
+    book_id: int | None
+    artifact_id: int | None
+    title: str
+    author: str
+    original_filename: str
+    stored_path: str
+    file_format: str
+    char_count: int
+    sha256: str
+    metadata: dict[str, Any]
+
+
 class Repository:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -275,6 +329,329 @@ class Repository:
                 f"+{max(0, next_attempt_seconds)} seconds",
                 delivery_id,
             ),
+        )
+
+    def add_reading_plan(self, draft: ReadingPlanDraft) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO reading_plans(
+                book_id,
+                source_artifact_id,
+                title,
+                source_path,
+                mode,
+                tone,
+                spoiler_policy,
+                plan_days,
+                daily_minutes,
+                lark_push_enabled,
+                metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.book_id,
+                draft.source_artifact_id,
+                draft.title,
+                draft.source_path,
+                draft.mode,
+                draft.tone,
+                draft.spoiler_policy,
+                draft.plan_days,
+                draft.daily_minutes,
+                1 if draft.lark_push_enabled else 0,
+                json.dumps(draft.metadata, ensure_ascii=False),
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def update_reading_plan_config(
+        self,
+        plan_id: int,
+        daily_minutes: int,
+        tone: str,
+        mode: str,
+        spoiler_policy: str,
+        lark_push_enabled: bool,
+        status: str,
+    ) -> bool:
+        cur = self.conn.execute(
+            """
+            UPDATE reading_plans
+            SET daily_minutes = ?,
+                tone = ?,
+                mode = ?,
+                spoiler_policy = ?,
+                lark_push_enabled = ?,
+                status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (daily_minutes, tone, mode, spoiler_policy, 1 if lark_push_enabled else 0, status, plan_id),
+        )
+        return cur.rowcount > 0
+
+    def add_reading_source_file(self, draft: ReadingSourceFileDraft) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO reading_source_files(
+                book_id,
+                artifact_id,
+                title,
+                author,
+                original_filename,
+                stored_path,
+                file_format,
+                char_count,
+                sha256,
+                metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.book_id,
+                draft.artifact_id,
+                draft.title,
+                draft.author,
+                draft.original_filename,
+                draft.stored_path,
+                draft.file_format,
+                draft.char_count,
+                draft.sha256,
+                json.dumps(draft.metadata, ensure_ascii=False),
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def list_reading_source_files(self, limit: int = 50, include_deleted: bool = False) -> list[sqlite3.Row]:
+        status_filter = "" if include_deleted else "WHERE rsf.status = 'active'"
+        return list(
+            self.conn.execute(
+                f"""
+                SELECT rsf.*, b.title AS book_title, b.author AS book_author
+                FROM reading_source_files rsf
+                LEFT JOIN books b ON b.id = rsf.book_id
+                {status_filter}
+                ORDER BY rsf.created_at DESC, rsf.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+
+    def get_reading_source_file(self, source_file_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT rsf.*, b.title AS book_title, b.author AS book_author
+            FROM reading_source_files rsf
+            LEFT JOIN books b ON b.id = rsf.book_id
+            WHERE rsf.id = ?
+            """,
+            (source_file_id,),
+        ).fetchone()
+
+    def mark_reading_source_file_deleted(self, source_file_id: int) -> bool:
+        cur = self.conn.execute(
+            """
+            UPDATE reading_source_files
+            SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'active'
+            """,
+            (source_file_id,),
+        )
+        return cur.rowcount > 0
+
+    def add_reading_plan_day(self, draft: ReadingPlanDayDraft) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO reading_plan_days(
+                plan_id,
+                day_number,
+                scheduled_date,
+                source_start_char,
+                source_end_char,
+                source_text,
+                estimated_minutes,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.plan_id,
+                draft.day_number,
+                draft.scheduled_date,
+                draft.source_start_char,
+                draft.source_end_char,
+                draft.source_text,
+                draft.estimated_minutes,
+                draft.status,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def add_reading_day_pack(self, draft: ReadingDayPackDraft) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO reading_day_packs(
+                plan_day_id,
+                artifact_id,
+                status,
+                route,
+                schema_version,
+                title,
+                content_json,
+                generator_provider,
+                error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.plan_day_id,
+                draft.artifact_id,
+                draft.status,
+                draft.route,
+                draft.schema_version,
+                draft.title,
+                json.dumps(draft.content, ensure_ascii=False),
+                draft.generator_provider,
+                draft.error_message,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def get_guided_reading_day_page(self, plan_day_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT
+                rpd.*,
+                rp.title AS plan_title,
+                rp.mode,
+                rp.tone,
+                rp.spoiler_policy,
+                rp.plan_days,
+                rp.daily_minutes,
+                rp.lark_push_enabled,
+                b.title AS book_title,
+                b.author AS book_author,
+                rdp.id AS pack_id,
+                rdp.content_json,
+                rdp.generator_provider,
+                rdp.status AS pack_status,
+                a.path AS artifact_path
+            FROM reading_plan_days rpd
+            JOIN reading_plans rp ON rp.id = rpd.plan_id
+            JOIN books b ON b.id = rp.book_id
+            LEFT JOIN reading_day_packs rdp ON rdp.plan_day_id = rpd.id
+            LEFT JOIN artifacts a ON a.id = rdp.artifact_id
+            WHERE rpd.id = ?
+            """,
+            (plan_day_id,),
+        ).fetchone()
+
+    def get_reading_plan_detail(self, plan_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT
+                rp.*,
+                b.title AS book_title,
+                b.author AS book_author,
+                a.path AS source_artifact_path
+            FROM reading_plans rp
+            JOIN books b ON b.id = rp.book_id
+            LEFT JOIN artifacts a ON a.id = rp.source_artifact_id
+            WHERE rp.id = ?
+            """,
+            (plan_id,),
+        ).fetchone()
+
+    def list_reading_plans(self, limit: int = 30) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT rp.*, b.title AS book_title, b.author AS book_author
+                FROM reading_plans rp
+                JOIN books b ON b.id = rp.book_id
+                ORDER BY rp.created_at DESC, rp.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+
+    def next_lark_push_reading_days(self, limit: int = 10) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT
+                    rpd.*,
+                    rp.title AS plan_title,
+                    rp.mode,
+                    rp.tone,
+                    rp.spoiler_policy,
+                    rp.plan_days,
+                    rp.daily_minutes,
+                    rp.lark_push_enabled,
+                    b.title AS book_title,
+                    b.author AS book_author,
+                    rdp.content_json
+                FROM reading_plan_days rpd
+                JOIN reading_plans rp ON rp.id = rpd.plan_id
+                JOIN books b ON b.id = rp.book_id
+                LEFT JOIN reading_day_packs rdp ON rdp.plan_day_id = rpd.id
+                WHERE rp.status = 'active'
+                    AND rp.lark_push_enabled = 1
+                    AND rpd.status IN ('pending', 'generated')
+                    AND (rpd.scheduled_date = '' OR rpd.scheduled_date <= date('now', 'localtime'))
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM reading_progress_events rpe
+                        WHERE rpe.plan_day_id = rpd.id
+                            AND rpe.event_type IN ('lark_push_sent', 'lark_push_skipped_disabled')
+                    )
+                ORDER BY rpd.scheduled_date ASC, rpd.day_number ASC, rpd.id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+
+    def reading_plan_days(self, plan_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT id, day_number, scheduled_date, estimated_minutes, status
+                FROM reading_plan_days
+                WHERE plan_id = ?
+                ORDER BY day_number ASC
+                """,
+                (plan_id,),
+            )
+        )
+
+    def add_reading_progress_event(
+        self,
+        plan_id: int,
+        plan_day_id: int | None,
+        event_type: str,
+        detail: dict[str, Any] | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO reading_progress_events(plan_id, plan_day_id, event_type, detail_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (plan_id, plan_day_id, event_type, json.dumps(detail or {}, ensure_ascii=False)),
+        )
+        return int(cur.lastrowid)
+
+    def mark_reading_plan_day_completed(self, plan_day_id: int) -> None:
+        self.conn.execute(
+            """
+            UPDATE reading_plan_days
+            SET status = 'completed', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (plan_day_id,),
         )
 
     def recommendation_exists(self, recommendation_id: int) -> bool:

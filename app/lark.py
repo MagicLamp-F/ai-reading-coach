@@ -138,6 +138,48 @@ class LarkRobotClient:
         )
         return self._send(payload)
 
+    def send_guided_reading_day(self, row, guided_reading_url: str) -> str | None:
+        import json
+
+        content = json.loads(row["content_json"] or "{}")
+        mode_label = "追剧式伴读" if str(row["mode"]) == "drama" else "渐进式导读"
+        spoiler_line = "不剧透：开启" if str(row["spoiler_policy"]) == "avoid" else "不剧透：关闭"
+        lines = [
+            f"**{row['book_title']}**",
+            f"Day {int(row['day_number'])}/{int(row['plan_days'])} · 约 {int(row['estimated_minutes'])} 分钟 · {mode_label}",
+            spoiler_line,
+            "",
+            f"**今日钩子**：{content.get('hook', '')}",
+            f"**今天只抓一个问题**：{content.get('one_question', '')}",
+            f"**明天预告**：{content.get('tomorrow_teaser', '')}",
+            "",
+            f"[打开今日导读]({guided_reading_url})",
+        ]
+        payload = self._signed_payload(
+            {
+                "msg_type": "interactive",
+                "card": {
+                    "config": {"wide_screen_mode": True},
+                    "header": {"title": {"tag": "plain_text", "content": "今日导读"}},
+                    "elements": [
+                        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+                        {
+                            "tag": "action",
+                            "actions": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "开始导读"},
+                                    "url": guided_reading_url,
+                                    "type": "primary",
+                                }
+                            ],
+                        },
+                    ],
+                },
+            }
+        )
+        return self._send(payload)
+
     def _signed_payload(self, payload: dict) -> dict:
         if not self.webhook_secret:
             return payload

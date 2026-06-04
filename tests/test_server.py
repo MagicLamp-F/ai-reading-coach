@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -9,7 +10,8 @@ from urllib.request import Request, urlopen
 from http.server import ThreadingHTTPServer
 
 from app.db import connect, init_db
-from app.feedback import build_feedback_url, build_reading_pack_url, sign_feedback_free_text
+from app.feedback import build_feedback_url, build_guided_reading_day_url, build_reading_pack_url, sign_feedback_free_text
+from app.guided_reading import GuidedReadingService
 from app.repository import ReadingPackDraft, RecommendationDraft, Repository
 from app.server import FeedbackHandler
 
@@ -164,6 +166,192 @@ class FeedbackServerTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, 403)
 
+    def test_guided_reading_page_renders_hook_source_and_feedback(self):
+        day_id = self._add_guided_reading_plan()
+        url = build_guided_reading_day_url(self.settings.public_base_url, day_id, self.settings.feedback_secret)
+
+        with urlopen(url, timeout=5) as response:
+            body = response.read().decode("utf-8")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("Day 1/2", body)
+        self.assertIn("今日钩子", body)
+        self.assertIn("今天只抓一个问题", body)
+        self.assertIn("今日原文", body)
+        self.assertIn("白话拆解", body)
+        self.assertIn("/guided-reading/feedback", body)
+        self.assertIn("太长了", body)
+        self.assertIn("想继续", body)
+
+    def test_guided_reading_feedback_records_progress_event(self):
+        day_id = self._add_guided_reading_plan()
+        token = build_guided_reading_day_url("", day_id, self.settings.feedback_secret).split("token=", 1)[1]
+        payload = urlencode(
+            {
+                "day_id": str(day_id),
+                "token": token,
+                "event_type": "too_long",
+                "note": "今天读不动",
+            }
+        ).encode("utf-8")
+        req = Request(
+            f"{self.settings.public_base_url}/guided-reading/feedback",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+        with urlopen(req, timeout=5) as response:
+            body = response.read().decode("utf-8")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("导读反馈已记录", body)
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute("SELECT * FROM reading_progress_events ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual(row["event_type"], "too_long")
+            self.assertIn("今天读不动", row["detail_json"])
+        finally:
+            conn.close()
+
+    def test_guided_reading_page_rejects_bad_signature(self):
+        day_id = self._add_guided_reading_plan()
+
+        with self.assertRaises(HTTPError) as ctx:
+            urlopen(f"{self.settings.public_base_url}/guided-reading?day_id={day_id}&token=bad", timeout=5)
+
+        self.assertEqual(ctx.exception.code, 403)
+
+    def test_guided_reading_plans_page_can_create_plan_with_lark_push(self):
+        admin_token = sign_feedback_free_text(0, self.settings.feedback_secret)
+        payload = urlencode(
+            {
+                "admin_token": admin_token,
+                "title": "页面配置书",
+                "author": "A",
+                "plan_days": "2",
+                "daily_minutes": "8",
+                "mode": "drama",
+                "tone": "drama",
+                "spoiler_policy": "avoid",
+                "lark_push_enabled": "1",
+                "source_text": "\n\n".join(
+                    [
+                        "第一段说明页面可以配置阅读计划，而且需要足够简单。用户打开业务系统后，应该能直接粘贴书源、选择天数和每天分钟数。",
+                        "第二段说明飞书推送应该是每本书独立开关，不应该全局强制开启。这样不同书可以有不同提醒策略。",
+                        "第三段说明追剧式伴读要避免剧透，并且只根据已读范围生成提示。系统不能提前揭示未读剧情。",
+                        "第四段说明用户反馈会影响后续计划。太长了就缩短，想继续就开放下一段，刚刚好就保持密度。",
+                    ]
+                ),
+            }
+        ).encode("utf-8")
+        req = Request(
+            f"{self.settings.public_base_url}/guided-reading/plans",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+        with urlopen(req, timeout=5) as response:
+            body = response.read().decode("utf-8")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("阅读计划已创建", body)
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute("SELECT * FROM reading_plans ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual(row["title"], "页面配置书")
+            self.assertEqual(row["mode"], "drama")
+            self.assertEqual(int(row["lark_push_enabled"]), 1)
+        finally:
+            conn.close()
+
+    def test_guided_reading_plans_page_rejects_bad_admin_token(self):
+        with self.assertRaises(HTTPError) as ctx:
+            urlopen(f"{self.settings.public_base_url}/guided-reading/plans?admin_token=bad", timeout=5)
+
+        self.assertEqual(ctx.exception.code, 403)
+
+    def test_guided_reading_sources_upload_detail_create_and_delete(self):
+        admin_token = sign_feedback_free_text(0, self.settings.feedback_secret)
+        boundary = "----arc" + uuid.uuid4().hex
+        source_text = "\n\n".join(
+            [
+                "第一段说明导入书源需要支持文件上传，而不是只能粘贴文本。用户可以上传 UTF-8 的 md 或 txt 文件。",
+                "第二段说明导入后需要管理入口，可以查看书源、基于书源创建计划，也可以删除不再使用的书源。",
+                "第三段说明第一版不支持 PDF 和 EPUB，因为解析质量和章节切分会明显复杂。",
+                "第四段说明上传限制必须保守，先限制文件大小和格式，避免业务系统暴露过大的输入面。",
+            ]
+        )
+        body = self._multipart_body(
+            boundary,
+            {
+                "admin_token": admin_token,
+                "title": "上传书源",
+                "author": "A",
+            },
+            {"source_file": ("source.txt", source_text.encode("utf-8"), "text/plain")},
+        )
+        req = Request(
+            f"{self.settings.public_base_url}/guided-reading/sources/upload",
+            data=body,
+            method="POST",
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+
+        with urlopen(req, timeout=5) as response:
+            uploaded = response.read().decode("utf-8")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("书源已导入", uploaded)
+        conn = connect(self.db_path)
+        try:
+            source = conn.execute("SELECT * FROM reading_source_files ORDER BY id DESC LIMIT 1").fetchone()
+            source_id = int(source["id"])
+            self.assertEqual(source["title"], "上传书源")
+            self.assertEqual(source["file_format"], "txt")
+        finally:
+            conn.close()
+
+        detail_url = f"{self.settings.public_base_url}/guided-reading/source?id={source_id}&admin_token={admin_token}"
+        with urlopen(detail_url, timeout=5) as response:
+            detail = response.read().decode("utf-8")
+        self.assertIn("内容预览", detail)
+        self.assertIn("基于此书源创建计划", detail)
+
+        payload = urlencode(
+            {
+                "admin_token": admin_token,
+                "source_file_id": str(source_id),
+                "title": "上传书源",
+                "plan_days": "2",
+                "daily_minutes": "8",
+                "mode": "guided",
+                "tone": "short_video",
+                "spoiler_policy": "avoid",
+            }
+        ).encode("utf-8")
+        req = Request(
+            f"{self.settings.public_base_url}/guided-reading/plans",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urlopen(req, timeout=5) as response:
+            created = response.read().decode("utf-8")
+        self.assertIn("阅读计划已创建", created)
+
+        payload = urlencode({"admin_token": admin_token, "source_file_id": str(source_id)}).encode("utf-8")
+        req = Request(
+            f"{self.settings.public_base_url}/guided-reading/sources/delete",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urlopen(req, timeout=5) as response:
+            deleted = response.read().decode("utf-8")
+        self.assertIn("书源已删除", deleted)
+
     def test_feedback_with_tampered_reason_signature_is_rejected(self):
         valid = build_feedback_url(
             self.settings.public_base_url,
@@ -286,6 +474,53 @@ class FeedbackServerTests(unittest.TestCase):
             )
         finally:
             conn.close()
+
+    def _add_guided_reading_plan(self) -> int:
+        source = Path(self.tmp.name) / "guided-source.md"
+        source.write_text(
+            "\n\n".join(
+                [
+                    "第一段先把问题抛出来。用户不是不想看书，而是没有耐心进入。",
+                    "第二段说明导读应该像短视频一样先给钩子，但后面要接回原文。",
+                    "第三段进入反馈。太长了就缩短，想继续就开放下一段。",
+                    "第四段说明追剧式伴读要避免剧透，只能根据已读范围生成上一集回顾、今日看点和下一集悬念。",
+                    "第五段强调第一版不要追求深度报告，而是先让用户愿意打开、读一点、反馈一下。",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        conn = connect(self.db_path)
+        try:
+            repo = Repository(conn)
+            result = GuidedReadingService(repo, library_dir=Path(self.tmp.name) / "library").create_plan_from_source(
+                source_path=source,
+                title="低耐心阅读",
+                plan_days=2,
+                daily_minutes=8,
+            )
+            return result.first_day_id
+        finally:
+            conn.close()
+
+    def _multipart_body(self, boundary: str, fields: dict, files: dict) -> bytes:
+        chunks = []
+        for name, value in fields.items():
+            chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+            chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+            chunks.append(str(value).encode("utf-8"))
+            chunks.append(b"\r\n")
+        for name, (filename, content, content_type) in files.items():
+            chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+            chunks.append(
+                (
+                    f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                    f"Content-Type: {content_type}\r\n\r\n"
+                ).encode("utf-8")
+            )
+            chunks.append(content)
+            chunks.append(b"\r\n")
+        chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+        return b"".join(chunks)
 
     def _feedback_count(self) -> int:
         conn = connect(self.db_path)

@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import unittest
+import json
 
 from app.http_client import HttpResponse
 from app.reading_pack import ReadingPackPreview
@@ -216,6 +217,42 @@ class LarkTests(unittest.TestCase):
         )
         self.assertIn("深度读完包", rendered)
         self.assertIn("机器归档", rendered)
+
+    def test_can_send_guided_reading_day_card(self):
+        http = CapturingHttp()
+        client = LarkRobotClient(webhook_url="https://example.test/webhook", webhook_secret="", http=http)
+        row = {
+            "book_title": "低耐心阅读",
+            "day_number": 1,
+            "plan_days": 5,
+            "estimated_minutes": 8,
+            "mode": "drama",
+            "spoiler_policy": "avoid",
+            "content_json": json.dumps(
+                {
+                    "hook": "上一集先续上。",
+                    "one_question": "人物关系发生了什么变化？",
+                    "tomorrow_teaser": "下一段继续看冲突怎么推进。",
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+        message_id = client.send_guided_reading_day(row, "https://example.test/guided")
+
+        self.assertEqual(message_id, "mid")
+        self.assertEqual(http.payload["card"]["header"]["title"]["content"], "今日导读")
+        rendered = "\n".join(
+            element["text"]["content"]
+            for element in http.payload["card"]["elements"]
+            if element.get("tag") == "div"
+        )
+        self.assertIn("低耐心阅读", rendered)
+        self.assertIn("追剧式伴读", rendered)
+        self.assertIn("不剧透：开启", rendered)
+        self.assertIn("上一集先续上", rendered)
+        actions = next(element["actions"] for element in http.payload["card"]["elements"] if element.get("tag") == "action")
+        self.assertEqual(actions[0]["url"], "https://example.test/guided")
 
     def test_send_retries_lark_frequency_limit_then_succeeds(self):
         sleeps = []
