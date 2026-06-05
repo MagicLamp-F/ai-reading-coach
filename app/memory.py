@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import json
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from threading import Lock
 
@@ -11,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LONG_TERM_MEMORY_MAX_CHARS = 6000
 DEFAULT_HERMES_NATIVE_PROFILE_MAX_CHARS = 6000
+DEFAULT_HERMES_NATIVE_USER_MEMORY_CHAR_LIMIT = 1375
 MEMORY_FILES = ("USER.md", "MEMORY.md")
+HERMES_MEMORY_ENTRY_DELIMITER = "\n§\n"
+HERMES_NATIVE_USER_MEMORY_MARKER = "[arc-reading-profile]"
 TRUNCATION_MARKER = "\n...[truncated]"
 EMPTY_LONG_TERM_MEMORY_CONTEXT = "暂无 Hermes long-term memory。"
 EMPTY_HERMES_NATIVE_PROFILE_CONTEXT = "暂无 Hermes native profile snapshot。"
@@ -35,6 +40,8 @@ class HermesNativeProfileProvider:
         max_chars: int = DEFAULT_HERMES_NATIVE_PROFILE_MAX_CHARS,
         generator_command: str = "",
         generator_timeout_seconds: float = 60.0,
+        native_user_memory_path: Path | None = None,
+        native_user_memory_char_limit: int = DEFAULT_HERMES_NATIVE_USER_MEMORY_CHAR_LIMIT,
         runner=subprocess.run,
     ):
         self.snapshot_path = snapshot_path
@@ -42,29 +49,34 @@ class HermesNativeProfileProvider:
         self.max_chars = max_chars
         self.generator_command = generator_command.strip()
         self.generator_timeout_seconds = generator_timeout_seconds
+        self.native_user_memory_path = native_user_memory_path
+        self.native_user_memory_char_limit = native_user_memory_char_limit
         self.runner = runner
 
     def load_context(self, seed_context: str = "") -> str:
         snapshot = _read_memory_file(self.snapshot_path, self.max_chars + 1)
         if snapshot:
             if self.generator_command and seed_context.strip() and _is_insufficient_native_profile(snapshot):
-                generated = self._generate_snapshot(
+                generated, user_memory_entry = self._generate_profile_update(
                     _read_memory_file(self.fallback_soul_path, self.max_chars + 1),
                     seed_context,
                 )
                 self.snapshot_path.write_text(generated.rstrip() + "\n", encoding="utf-8")
+                self._sync_native_user_memory(generated, user_memory_entry)
                 _record_native_profile_load("generated_snapshot")
                 logger.info("Hermes native profile snapshot refreshed from ARC evidence: snapshot_path=%s", self.snapshot_path)
                 return _truncate(f"{self.snapshot_path.name}:\n{generated}", self.max_chars)
+            self._sync_native_user_memory(snapshot)
             _record_native_profile_load("snapshot")
             return _truncate(f"{self.snapshot_path.name}:\n{snapshot}", self.max_chars)
 
         soul = _read_memory_file(self.fallback_soul_path, self.max_chars + 1)
         if soul:
             if self.generator_command:
-                generated = self._generate_snapshot(soul, seed_context)
+                generated, user_memory_entry = self._generate_profile_update(soul, seed_context)
                 self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
                 self.snapshot_path.write_text(generated.rstrip() + "\n", encoding="utf-8")
+                self._sync_native_user_memory(generated, user_memory_entry)
                 _record_native_profile_load("generated_snapshot")
                 logger.info(
                     "Hermes native profile snapshot generated: snapshot_path=%s fallback_path=%s",
@@ -83,7 +95,7 @@ class HermesNativeProfileProvider:
         _record_native_profile_load("missing")
         return EMPTY_HERMES_NATIVE_PROFILE_CONTEXT
 
-    def _generate_snapshot(self, soul: str, seed_context: str = "") -> str:
+    def _generate_profile_update(self, soul: str, seed_context: str = "") -> tuple[str, str]:
         argv = shlex.split(self.generator_command)
         if not argv:
             raise RuntimeError("Hermes native profile generator command is empty")
@@ -100,15 +112,22 @@ class HermesNativeProfileProvider:
                 "Output exactly this JSON shape and no other text: "
                 '{"markdown":"# HERMES_NATIVE_PROFILE\\n\\n## Stable Identity\\n...\\n\\n## Long-term Interests\\n...\\n\\n'
                 '## Reading Preferences\\n...\\n\\n## Thinking Style\\n...\\n\\n## Current Stage\\n...\\n\\n'
-                '## Aversion Patterns\\n...\\n\\n## Open Questions\\n...\\n\\n## Source Notes\\n..."}'
+                '## Aversion Patterns\\n...\\n\\n## Open Questions\\n...\\n\\n## Source Notes\\n...",'
+                '"hermes_user_memory_entry":"[arc-reading-profile] User reading profile: ..."} '
+                "The hermes_user_memory_entry must be one compact declarative USER memory entry under "
+                f"{self.native_user_memory_char_limit} characters. It must be based on evidence, not guesses."
             ),
             "context": {"soul": soul[: self.max_chars], "arc_evidence": seed_context[: self.max_chars]},
-            "output_contract": {"markdown": "markdown string"},
+            "output_contract": {
+                "markdown": "markdown string",
+                "hermes_user_memory_entry": "compact declarative Hermes USER.md memory entry",
+            },
             "constraints": {
                 "do_not_modify_sqlite": True,
                 "do_not_send_messages": True,
                 "do_not_apply_patches": True,
                 "business_orchestrator_writes_snapshot": True,
+                "business_orchestrator_writes_native_user_memory": bool(self.native_user_memory_path),
             },
         }
         try:
@@ -138,7 +157,19 @@ class HermesNativeProfileProvider:
             raise RuntimeError("Hermes native profile generator returned empty markdown")
         if not markdown.startswith("# HERMES_NATIVE_PROFILE"):
             markdown = "# HERMES_NATIVE_PROFILE\n\n" + markdown
-        return markdown
+        user_memory_entry = str(response.get("hermes_user_memory_entry") or "").strip()
+        return markdown, user_memory_entry
+
+    def _sync_native_user_memory(self, markdown: str, user_memory_entry: str = "") -> None:
+        if self.native_user_memory_path is None:
+            return
+        entry = _normalize_hermes_user_memory_entry(user_memory_entry or markdown)
+        upsert_hermes_user_memory_entry(
+            path=self.native_user_memory_path,
+            entry=entry,
+            char_limit=self.native_user_memory_char_limit,
+        )
+        logger.info("Hermes native USER memory synced: path=%s", self.native_user_memory_path)
 
 
 def load_long_term_memory_context(
@@ -209,6 +240,116 @@ def _record_native_profile_load(source: str) -> None:
 
 def _is_insufficient_native_profile(text: str) -> bool:
     return any(marker in text for marker in INSUFFICIENT_PROFILE_MARKERS)
+
+
+def upsert_hermes_user_memory_entry(path: Path, entry: str, char_limit: int = DEFAULT_HERMES_NATIVE_USER_MEMORY_CHAR_LIMIT) -> None:
+    normalized = _normalize_hermes_user_memory_entry(entry)
+    _validate_hermes_memory_entry(normalized)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries = _read_hermes_memory_entries(path)
+    entries = [existing for existing in entries if HERMES_NATIVE_USER_MEMORY_MARKER not in existing]
+    entries.append(normalized)
+    total = len(HERMES_MEMORY_ENTRY_DELIMITER.join(entries))
+    if total > char_limit:
+        raise RuntimeError(
+            f"Hermes native USER memory sync would exceed char limit: {total}/{char_limit} at {path}"
+        )
+    _atomic_write_text(path, HERMES_MEMORY_ENTRY_DELIMITER.join(entries))
+
+
+def _read_hermes_memory_entries(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    raw = _read_memory_file(path, 100_000)
+    if not raw:
+        return []
+    entries = [entry.strip() for entry in raw.split(HERMES_MEMORY_ENTRY_DELIMITER)]
+    return list(dict.fromkeys(entry for entry in entries if entry))
+
+
+def _normalize_hermes_user_memory_entry(text: str) -> str:
+    compact = _compact_native_profile_markdown(text)
+    compact = " ".join(compact.split())
+    if HERMES_NATIVE_USER_MEMORY_MARKER in compact:
+        suffix = compact.split(HERMES_NATIVE_USER_MEMORY_MARKER, 1)[1].strip(" :-")
+        compact = suffix or compact
+    profile_prefix = "User reading profile:"
+    if compact.startswith(profile_prefix):
+        compact = compact[len(profile_prefix):].strip()
+    max_body_chars = 950
+    if len(compact) > max_body_chars:
+        compact = compact[:max_body_chars].rstrip() + "..."
+    return f"{HERMES_NATIVE_USER_MEMORY_MARKER} User reading profile: {compact}"
+
+
+def _compact_native_profile_markdown(text: str) -> str:
+    sections = _parse_markdown_sections(text)
+    if not sections:
+        return " ".join(
+            line.strip("-#* \t")
+            for line in text.splitlines()
+            if line.strip() and not line.strip().startswith("## Source Notes")
+        )
+
+    selected: list[str] = []
+    for heading, limit in (
+        ("Reading Preferences", 4),
+        ("Long-term Interests", 3),
+        ("Thinking Style", 2),
+        ("Current Stage", 2),
+        ("Aversion Patterns", 2),
+    ):
+        bullets = sections.get(heading, [])[:limit]
+        if bullets:
+            selected.append(f"{heading}: " + " ".join(bullets))
+    return " ".join(selected)
+
+
+def _parse_markdown_sections(text: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("## "):
+            current = line[3:].strip()
+            sections.setdefault(current, [])
+            continue
+        if current and line.startswith("- "):
+            sections.setdefault(current, []).append(line[2:].strip())
+    return sections
+
+
+def _validate_hermes_memory_entry(entry: str) -> None:
+    if HERMES_MEMORY_ENTRY_DELIMITER.strip() in entry:
+        raise RuntimeError("Hermes native USER memory entry cannot contain the Hermes entry delimiter")
+    lowered = entry.lower()
+    blocked = (
+        "ignore previous instructions",
+        "ignore all instructions",
+        "system prompt override",
+        "do not tell the user",
+        "authorized_keys",
+    )
+    if any(marker in lowered for marker in blocked):
+        raise RuntimeError("Hermes native USER memory entry contains blocked prompt-injection content")
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".arc_hermes_mem_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _truncate(text: str, max_chars: int) -> str:

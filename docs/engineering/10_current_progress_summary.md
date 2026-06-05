@@ -19,9 +19,13 @@ AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP +
 -> 每周生成 7 天画像复盘
 ```
 
-2026-06-05 新增 Hermes native profile Phase 1：`run-daily` 会优先读取 `memory/HERMES_NATIVE_PROFILE.md`，缺失或仅含“缺少个人阅读事实”占位时，通过 Hermes `reading.profile.sync_snapshot` 生成只读 snapshot。snapshot 的主证据来自 ARC SQLite reading profile 和 ARC applied memory；SOUL 只作为低优先级背景。daily prompt 现在按 Priority 1-5 显式分层：Hermes native profile、明确 ARC 反馈、ARC reading profile、ARC applied memory、单次弱信号。
+2026-06-05 新增 Hermes native profile Phase 1：`run-daily` 会优先读取 `memory/HERMES_NATIVE_PROFILE.md`，缺失或仅含“缺少个人阅读事实”占位时，通过 Hermes `reading.profile.sync_snapshot` 生成 snapshot。snapshot 的主证据来自 ARC SQLite reading profile 和 ARC applied memory；SOUL 只作为低优先级背景。daily prompt 现在按 Priority 1-5 显式分层：Hermes native profile、明确 ARC 反馈、ARC reading profile、ARC applied memory、单次弱信号。
+
+同日追加 Hermes native USER memory 同步：ARC 会把 Hermes 生成的阅读画像 upsert 到 `/home/ubuntu/.hermes/memories/USER.md` 的 `[arc-reading-profile]` entry，让 Hermes UI/CLI 新会话能读到同一条用户阅读画像。该同步只替换 ARC 管理的这一条 memory，保留 Hermes 已有 USER memories；写入超限或路径异常会让流程失败，不走 fallback。
 
 同日将 Hermes provider 改为严格模式：`DAILY_RECOMMENDATION_PROVIDER=hermes-agent`、`READING_PACK_PROVIDER=hermes-agent`、`HERMES_REFLECTION_PROVIDER=hermes-agent` 下，Hermes 失败会让对应 run 失败，不再静默 fallback。真实正常流程已验证：`daily run_id=48` 成功生成《活着》推荐和 Hermes deep read pack，`reflection run_id=49` 成功生成并自动应用 `reflection_id=4`。
+
+Hermes native USER memory 同步后的真实正常流程也已验证：`daily run_id=50` 成功推荐《额尔古纳河右岸》，`reading_pack id=37` 由 `hermes-agent` 生成，`reflection run_id=51` 成功生成并自动应用 `reflection_id=5`；`/home/ubuntu/.hermes/memories/USER.md` 出现 596 字符的 `[arc-reading-profile]` entry。
 
 技术骨架、运行流程、配置和验证命令见：
 
@@ -144,6 +148,8 @@ DAILY_RECOMMENDATION_PROVIDER=hermes-agent
   - 优先读取 snapshot。
   - snapshot 缺失时调用 Hermes `reading.profile.sync_snapshot` 生成。
   - 生成失败时让 daily run 失败，不再把 SOUL 原文冒充用户画像。
+  - 将 snapshot 或 Hermes 返回的 compact entry 同步到 `/home/ubuntu/.hermes/memories/USER.md`。
+- native USER memory 同步使用 `[arc-reading-profile]` 标记 upsert，只替换这一条 entry，不覆盖 Hermes 其它 USER memories。
 - `/metrics` 暴露 `reading_coach_hermes_native_profile_loads_total`，按 `snapshot`、`generated_snapshot`、`soul_fallback`、`missing` 统计。
 - 2026-06-05 真实测试确认：当前 `/home/ubuntu/.hermes/SOUL.md` 是 Hermes Agent 身份说明，不是用户画像；后续已改为把 ARC evidence 传给 Hermes 生成 snapshot，并刷新出包含经典名著/高口碑文学/科幻、个人知识管理、软件工程实践和 AI Agent 商业化降频判断的可用画像。
 

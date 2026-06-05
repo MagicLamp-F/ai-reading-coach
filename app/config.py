@@ -36,6 +36,8 @@ class Settings:
     hermes_native_profile_path: Path
     hermes_soul_path: Path
     hermes_native_profile_max_chars: int
+    hermes_native_user_memory_path: Path | None
+    hermes_native_user_memory_char_limit: int
     hermes_agent_command: str
     hermes_agent_timeout_seconds: float
     hermes_reflection_auto_apply: bool
@@ -92,6 +94,10 @@ class Settings:
             hermes_native_profile_path=Path(os.getenv("HERMES_NATIVE_PROFILE_PATH", "memory/HERMES_NATIVE_PROFILE.md")),
             hermes_soul_path=Path(os.getenv("HERMES_SOUL_PATH", "/home/ubuntu/.hermes/SOUL.md")),
             hermes_native_profile_max_chars=int(os.getenv("HERMES_NATIVE_PROFILE_MAX_CHARS", "6000")),
+            hermes_native_user_memory_path=_optional_path(
+                os.getenv("HERMES_NATIVE_USER_MEMORY_PATH", "/home/ubuntu/.hermes/memories/USER.md")
+            ),
+            hermes_native_user_memory_char_limit=int(os.getenv("HERMES_NATIVE_USER_MEMORY_CHAR_LIMIT", "1375")),
             hermes_agent_command=os.getenv(
                 "HERMES_AGENT_COMMAND",
                 "/home/ubuntu/projects/hermes-agent/bin/reflect-json",
@@ -125,6 +131,13 @@ def _database_path(database_url: str) -> Path:
         raise ValueError("Only sqlite:/// DATABASE_URL is supported in the MVP")
     raw_path = database_url[len(prefix) :]
     return Path(raw_path)
+
+
+def _optional_path(value: str) -> Path | None:
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return Path(stripped)
 
 
 def _env_bool(name: str, default: bool) -> bool:

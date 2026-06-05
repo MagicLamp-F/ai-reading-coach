@@ -83,6 +83,8 @@ def build_context(settings: Settings) -> AppContext:
         max_chars=settings.hermes_native_profile_max_chars,
         generator_command=settings.hermes_agent_command,
         generator_timeout_seconds=settings.hermes_agent_timeout_seconds,
+        native_user_memory_path=settings.hermes_native_user_memory_path,
+        native_user_memory_char_limit=settings.hermes_native_user_memory_char_limit,
     )
     workflow = ReadingCoachWorkflow(
         repo=repo,

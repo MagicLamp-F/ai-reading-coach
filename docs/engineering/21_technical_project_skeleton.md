@@ -13,7 +13,7 @@ SQLite 保存事实
 -> 反馈再进入下一轮画像与推荐
 ```
 
-Hermes 是智能生成层，不直接写 ARC SQLite，不直接发飞书。ARC 是业务账本、投递和审计系统。当前 Hermes native profile snapshot 由 Hermes 生成，但输入证据以 ARC SQLite reading profile 和 ARC applied memory 为主，SOUL 只作为低优先级背景。
+Hermes 是智能生成层，不直接写 ARC SQLite，不直接发飞书。ARC 是业务账本、投递和审计系统。当前 Hermes native profile snapshot 由 Hermes 生成，但输入证据以 ARC SQLite reading profile 和 ARC applied memory 为主，SOUL 只作为低优先级背景。ARC 会把这份阅读画像同步到 Hermes built-in `USER.md`，让 Hermes UI/CLI 的新会话也能看到同一条阅读画像 memory。
 
 ## 2. 核心目录
 
@@ -62,6 +62,7 @@ Settings.from_env()
       -> 读 memory/HERMES_NATIVE_PROFILE.md
       -> 缺失或仅含“缺少个人阅读事实”占位时，调用 reading.profile.sync_snapshot
       -> Hermes 基于 ARC reading profile + ARC applied memory + 低优先级 SOUL 生成 snapshot
+      -> upsert 到 /home/ubuntu/.hermes/memories/USER.md 的 [arc-reading-profile] entry
    -> build_profile_context(repo)
    -> load_long_term_memory_context(memory/USER.md, memory/MEMORY.md)
    -> build_daily_profile_context(Priority 1-5)
@@ -89,6 +90,20 @@ Priority 5: Single-run weak signals
 ```
 
 注意：当前 `/home/ubuntu/.hermes/SOUL.md` 是 Hermes Agent 身份说明，不是用户画像。因此 native snapshot 不能只依赖 SOUL。2026-06-05 已调整为由 ARC reading profile 和 ARC applied memory 提供主证据，Hermes 负责把这些证据整理成 `memory/HERMES_NATIVE_PROFILE.md`。
+
+Hermes native memory 的真实位置是当前 `HERMES_HOME/memories/USER.md`。默认部署中为：
+
+```text
+/home/ubuntu/.hermes/memories/USER.md
+```
+
+ARC 只管理其中一条 entry：
+
+```text
+[arc-reading-profile] User reading profile: ...
+```
+
+重复运行会替换这条 entry，不会清空 Hermes UI/CLI 里已有的其它 USER memories。Hermes Agent 会在新会话启动时冻结读取 built-in memory，因此 UI 旧会话不会保证实时注入刚写入的画像。
 
 ## 5. Hermes 严格模式
 
@@ -124,6 +139,8 @@ HERMES_AGENT_TIMEOUT_SECONDS=180
 HERMES_NATIVE_PROFILE_PATH=memory/HERMES_NATIVE_PROFILE.md
 HERMES_SOUL_PATH=/home/ubuntu/.hermes/SOUL.md
 HERMES_NATIVE_PROFILE_MAX_CHARS=6000
+HERMES_NATIVE_USER_MEMORY_PATH=/home/ubuntu/.hermes/memories/USER.md
+HERMES_NATIVE_USER_MEMORY_CHAR_LIMIT=1375
 ```
 
 不要设置无效的 Hermes model override。2026-06-05 发现：
@@ -157,6 +174,17 @@ set +a
 
 ```bash
 python3 -m app.cli run-daily
+```
+
+验证 Hermes native USER memory：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+path = Path('/home/ubuntu/.hermes/memories/USER.md')
+print(path)
+print(path.read_text(encoding='utf-8'))
+PY
 ```
 
 查最新 run：
@@ -197,7 +225,27 @@ artifact: library/2026/06/2026-06-05__活着/reading-pack.md
 
 - Hermes daily 确实基于现有 ARC reading profile 生成了文学/经典方向推荐。
 - Hermes native snapshot 已由 Hermes 基于 ARC 证据刷新，当前包含用户对经典名著、高口碑文学、科幻作品、个人知识管理、软件工程实践和 AI Agent 商业化降频的画像判断。
-- 若要让 Hermes native profile 成为真正跨场景主画像，下一步仍需要接入 Hermes 原生用户 memory export，而不是只依赖 ARC 阅读证据。
+- ARC 已支持把该 snapshot/upsert entry 写入 Hermes native `/home/ubuntu/.hermes/memories/USER.md`。这解决了“ARC 侧有画像但 Hermes UI 看不到”的问题；反馈事件自动驱动 Hermes 主画像增量更新仍属于下一阶段。
+
+native USER memory 同步验证：
+
+```text
+path: /home/ubuntu/.hermes/memories/USER.md
+chars: 596
+entry: [arc-reading-profile] User reading profile: Reading Preferences...
+```
+
+追加真实正常流程 run：
+
+```text
+daily run_id=50 success
+recommendation_id=66: 额尔古纳河右岸 / 迟子建
+theme: 高口碑当代中文文学：从清晰叙事进入个体、族群与时代经验
+reading_pack id=37 status=generated generator_provider=hermes-agent
+artifact: library/2026/06/2026-06-05__额尔古纳河右岸/reading-pack.md
+reflection run_id=51 success
+reflection_id=5 applied
+```
 
 ## 9. 文档维护规则
 

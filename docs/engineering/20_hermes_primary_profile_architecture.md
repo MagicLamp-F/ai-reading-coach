@@ -154,9 +154,9 @@ Do not modify files, databases, memories, messages, network channels, or apply p
 
 这样可以保留当前安全边界，同时给主画像更新开一个可审计、可限流、可回滚的专门通道。
 
-## 7. Hermes Native Profile Snapshot
+## 7. Hermes Native Profile Snapshot 与 Native USER Memory
 
-ARC 不应每次直接解析大量 Hermes chat 历史。更稳妥的是维护一个只读 snapshot：
+ARC 不应每次直接解析大量 Hermes chat 历史。更稳妥的是维护一个 ARC 可读 snapshot：
 
 ```text
 memory/HERMES_NATIVE_PROFILE.md
@@ -186,6 +186,28 @@ memory/HERMES_NATIVE_PROFILE.md
 
 ARC daily prompt 优先读取这个 snapshot。snapshot 只作为上下文，不直接覆盖 ARC SQLite。
 
+从 2026-06-05 起，ARC 还会把这份 Hermes 生成的阅读画像同步为 Hermes built-in user memory：
+
+```text
+/home/ubuntu/.hermes/memories/USER.md
+```
+
+Hermes 的 built-in memory 是文件型存储，`USER.md` 和 `MEMORY.md` 位于当前 `HERMES_HOME/memories/` 下，entry 使用 `§` 分隔。ARC 只维护一条带标记的 entry：
+
+```text
+[arc-reading-profile] User reading profile: ...
+```
+
+同步策略：
+
+- `memory/HERMES_NATIVE_PROFILE.md` 缺失或占位时，Hermes 先通过 `reading.profile.sync_snapshot` 基于 ARC evidence 生成 snapshot。
+- 如果 Hermes 同时返回 `hermes_user_memory_entry`，ARC 使用该 compact entry 写入 native `USER.md`。
+- 如果已有 snapshot，ARC 会从 snapshot 派生 compact entry 并 upsert 到 native `USER.md`。
+- upsert 只替换 `[arc-reading-profile]` 这一条，保留 Hermes UI/CLI 里已有的其它 USER memories。
+- 写入超出 Hermes user memory 字符上限、路径不可写或内容包含注入风险时，流程直接失败，不走 fallback。
+
+注意：Hermes 会在新会话启动时冻结读取 built-in memory。写入 `USER.md` 后，已经打开的 UI 会话不一定立刻把新画像注入 prompt；新会话或重启 bridge 后才会稳定生效。
+
 后续可以从这些来源生成 snapshot：
 
 - `/home/ubuntu/.hermes/SOUL.md`
@@ -208,15 +230,16 @@ ARC daily prompt 优先读取这个 snapshot。snapshot 只作为上下文，不
 
 ## 9. 实施阶段
 
-### Phase 1: 只读对齐
+### Phase 1: 只读对齐 + native USER memory 同步
 
-目标：让 ARC 推荐先使用 Hermes 原生画像，不改变 Hermes memory。
+目标：让 ARC 推荐先使用 Hermes 原生画像，并把 Hermes 生成的阅读画像同步到 Hermes built-in USER memory。
 
 任务：
 
 - 新增 `HermesNativeProfileProvider`。
 - 读取 `memory/HERMES_NATIVE_PROFILE.md`。
-- 如果文件不存在，尝试从 `/home/ubuntu/.hermes/SOUL.md` 生成初始上下文。
+- 如果文件不存在，调用 `reading.profile.sync_snapshot`，以 ARC SQLite reading profile 和 ARC applied memory 为主证据生成初始 snapshot。
+- 将 snapshot/upsert entry 同步到 `/home/ubuntu/.hermes/memories/USER.md`。
 - 修改 daily profile context，把 Hermes native profile 放在最高优先级。
 - 保留 ARC `profile_items`，但标记为 `ARC inferred reading profile`。
 
@@ -224,7 +247,8 @@ ARC daily prompt 优先读取这个 snapshot。snapshot 只作为上下文，不
 
 - run-daily 的 prompt 中能看到 Hermes native profile 在最前面。
 - ARC 推荐理由明确映射到 native profile 或 ARC feedback。
-- native profile 缺失时系统降级，不阻断日推。
+- Hermes native `USER.md` 出现 `[arc-reading-profile]` entry。
+- native profile 生成或 USER memory 写入失败时系统失败暴露，不静默降级。
 
 ### Phase 2: 反馈证据上送
 
@@ -301,6 +325,8 @@ ARC 已经以 Hermes native profile 为主画像
 ```
 
 因此这两个开关是 ARC 画像增强开关，不是主画像对齐方案。
+
+当前已完成的是 snapshot -> Hermes native `USER.md` 的受控同步，不等于反馈事件自动写入长期主画像。反馈驱动的 `reading.feedback.ingest` 仍需要独立审计链路。
 
 ## 11. 最终验收标准
 
