@@ -12,7 +12,10 @@ from app.feedback import FEEDBACK_LABELS, FEEDBACK_REASON_LABELS, FEEDBACK_TYPES
 from app.daily_agent_adapter import DailyRecommendationAgentAdapter
 from app.lark import LarkFeedbackLink, LarkRobotClient
 from app.llm import OpenAIChatClient
-from app.memory import DEFAULT_LONG_TERM_MEMORY_MAX_CHARS, load_long_term_memory_context
+from app.memory import DEFAULT_LONG_TERM_MEMORY_MAX_CHARS, HermesNativeProfileProvider
+from app.memory import build_daily_profile_context as build_prioritized_daily_profile_context
+from app.memory import build_native_profile_seed_context
+from app.memory import load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
 from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview
 from app.repository import DeliveryOutboxDraft, RecommendationCandidateDraft, RecommendationDraft, Repository
@@ -98,6 +101,7 @@ class ReadingCoachWorkflow:
         daily_recommendation_count: int = 3,
         memory_dir: Path = Path("memory"),
         max_memory_chars: int = DEFAULT_LONG_TERM_MEMORY_MAX_CHARS,
+        hermes_native_profile_provider: HermesNativeProfileProvider | None = None,
         reading_packs_enabled: bool = False,
         reading_pack_library_dir: Path = Path("library"),
         daily_recommendation_agent: DailyRecommendationAgentAdapter | None = None,
@@ -122,6 +126,9 @@ class ReadingCoachWorkflow:
         self.daily_recommendation_count = max(1, daily_recommendation_count)
         self.memory_dir = memory_dir
         self.max_memory_chars = max_memory_chars
+        self.hermes_native_profile_provider = hermes_native_profile_provider or HermesNativeProfileProvider(
+            snapshot_path=memory_dir / "HERMES_NATIVE_PROFILE.md"
+        )
         self.reading_packs_enabled = reading_packs_enabled
         self.reading_pack_library_dir = reading_pack_library_dir
         self.daily_recommendation_agent = daily_recommendation_agent
@@ -138,9 +145,17 @@ class ReadingCoachWorkflow:
         api_calls = 0
         try:
             processed_feedback = process_feedback(self.repo)
+            structured_profile_context = build_profile_context(self.repo)
+            long_term_memory_context = load_long_term_memory_context(self.memory_dir, self.max_memory_chars)
             profile_context = build_daily_profile_context(
-                structured_profile_context=build_profile_context(self.repo),
-                long_term_memory_context=load_long_term_memory_context(self.memory_dir, self.max_memory_chars),
+                hermes_native_profile_context=self.hermes_native_profile_provider.load_context(
+                    seed_context=build_native_profile_seed_context(
+                        structured_profile_context=structured_profile_context,
+                        long_term_memory_context=long_term_memory_context,
+                    )
+                ),
+                structured_profile_context=structured_profile_context,
+                long_term_memory_context=long_term_memory_context,
             )
             themes = self._generate_themes(profile_context)
             if self.daily_recommendation_agent is None and self.llm.api_key:
@@ -408,6 +423,7 @@ class ReadingCoachWorkflow:
                 memory_dir=self.memory_dir,
                 library_dir=self.reading_pack_library_dir,
                 max_memory_chars=self.max_memory_chars,
+                hermes_native_profile_provider=self.hermes_native_profile_provider,
                 agent=self.reading_pack_agent,
                 source_collector=self.source_collector,
             ).generate_for_recommendation(recommendation_id)
@@ -423,6 +439,8 @@ class ReadingCoachWorkflow:
             warning = f"reading pack generation failed: recommendation_id={recommendation_id}: {exc}"
             logger.warning(warning)
             self.repo.record_run_warning(run_id, warning)
+            if self.reading_pack_agent is not None:
+                raise
             return None
 
     def _send_reading_pack_preview(
@@ -479,11 +497,7 @@ class ReadingCoachWorkflow:
 
     def _generate_themes(self, profile_context: str) -> list[str]:
         if self.daily_recommendation_agent is not None:
-            try:
-                return self.daily_recommendation_agent.generate_themes(profile_context)
-            except Exception:
-                logger.exception("Hermes daily theme generation failed; using default themes")
-                return DEFAULT_THEMES
+            return self.daily_recommendation_agent.generate_themes(profile_context)
         try:
             response = self.llm.complete_json(
                 "你是读书推荐系统的画像决策层。只输出 JSON。",
@@ -491,8 +505,8 @@ class ReadingCoachWorkflow:
                     "根据用户画像上下文生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
                     "如果画像显示用户偏好经典名著、文学、科幻或高口碑作品，主题必须明显覆盖这些方向，"
                     "不要只生成工程技术、商业或工具书主题。"
-                    "用户画像上下文明确分为 SQLite structured profile 和 Hermes long-term memory；"
-                    "二者都可使用，但不要假设未出现在上下文中的 draft reflection 已生效。"
+                    "用户画像上下文按 Priority 1-5 分层；必须优先遵循 Hermes native profile snapshot，"
+                    "再参考明确反馈和 ARC reading profile；不要把单次弱信号写成长期偏好。"
                     '输出格式：{"themes":["主题1","主题2","主题3"]}\n\n'
                     f"用户画像上下文：\n{profile_context}"
                 ),
@@ -513,19 +527,16 @@ class ReadingCoachWorkflow:
         max_books: int = 3,
     ) -> list[RecommendationDraft]:
         if self.daily_recommendation_agent is not None:
-            try:
-                books = self.daily_recommendation_agent.generate_recommendations(
-                    profile_context,
-                    themes,
-                    search_results,
-                    max_books=max_books,
-                )
-                drafts = [self._draft_from_dict(item) for item in books[:max_books] if isinstance(item, dict)]
-                if drafts:
-                    return drafts
-            except Exception:
-                logger.exception("Hermes daily recommendation generation failed; using fallback books")
-            return [self._draft_from_dict(item) for item in FALLBACK_BOOKS]
+            books = self.daily_recommendation_agent.generate_recommendations(
+                profile_context,
+                themes,
+                search_results,
+                max_books=max_books,
+            )
+            drafts = [self._draft_from_dict(item) for item in books[:max_books] if isinstance(item, dict)]
+            if not drafts:
+                raise RuntimeError("Hermes daily recommendation generation returned no usable books")
+            return drafts
 
         search_context = "\n".join(
             f"- {result.title}\n  {result.url}\n  {result.content[:300]}"
@@ -535,8 +546,8 @@ class ReadingCoachWorkflow:
             response = self.llm.complete_json(
                 "你是读书私教系统的执行层。只输出 JSON，不要输出 Markdown。",
                 (
-                    "用户画像上下文明确分为 SQLite structured profile 和 Hermes long-term memory；"
-                    "二者都可使用，但不要假设未出现在上下文中的 draft reflection 已生效。"
+                    "用户画像上下文按 Priority 1-5 分层；必须优先遵循 Hermes native profile snapshot，"
+                    "再参考明确反馈和 ARC reading profile；不要把单次弱信号写成长期偏好。"
                     f"基于用户画像上下文、今日主题和搜索结果，输出 {max_books} 本候选书。"
                     "优先推荐真正的书，尤其是经典名著、高口碑文学、严肃小说、科幻经典或长期被讨论的作品；"
                     "如果用户提到《一句顶一万句》《三体》这类偏好，应优先选择相近气质或同等口碑的书。"
@@ -748,12 +759,15 @@ def _preferred_source_url(current_url: str, sources: list[Any]) -> str:
     return candidates[0][1]
 
 
-def build_daily_profile_context(structured_profile_context: str, long_term_memory_context: str) -> str:
-    return (
-        "SQLite structured profile:\n"
-        f"{structured_profile_context.strip() or '暂无画像。'}\n\n"
-        "Hermes long-term memory:\n"
-        f"{long_term_memory_context.strip() or '暂无 Hermes long-term memory。'}"
+def build_daily_profile_context(
+    structured_profile_context: str,
+    long_term_memory_context: str,
+    hermes_native_profile_context: str = "",
+) -> str:
+    return build_prioritized_daily_profile_context(
+        structured_profile_context=structured_profile_context,
+        long_term_memory_context=long_term_memory_context,
+        hermes_native_profile_context=hermes_native_profile_context,
     )
 
 

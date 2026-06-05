@@ -59,6 +59,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.reading_pack_provider, "hermes-agent")
         self.assertEqual(settings.hermes_reflection_provider, "hermes-agent")
 
+    def test_settings_reads_hermes_native_profile_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "DATABASE_URL": f"sqlite:///{tmp}/test.db",
+                "HERMES_NATIVE_PROFILE_PATH": f"{tmp}/HERMES_NATIVE_PROFILE.md",
+                "HERMES_SOUL_PATH": f"{tmp}/SOUL.md",
+                "HERMES_NATIVE_PROFILE_MAX_CHARS": "1234",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                settings = Settings.from_env()
+
+        self.assertEqual(settings.hermes_native_profile_path, Path(tmp) / "HERMES_NATIVE_PROFILE.md")
+        self.assertEqual(settings.hermes_soul_path, Path(tmp) / "SOUL.md")
+        self.assertEqual(settings.hermes_native_profile_max_chars, 1234)
+
     def test_settings_reads_lark_retry_controls(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = {

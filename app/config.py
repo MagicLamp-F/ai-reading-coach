@@ -33,6 +33,9 @@ class Settings:
     daily_recommendation_count: int
     daily_recommendation_provider: str
     hermes_reflection_provider: str
+    hermes_native_profile_path: Path
+    hermes_soul_path: Path
+    hermes_native_profile_max_chars: int
     hermes_agent_command: str
     hermes_agent_timeout_seconds: float
     hermes_reflection_auto_apply: bool
@@ -86,6 +89,9 @@ class Settings:
             daily_recommendation_count=int(os.getenv("DAILY_RECOMMENDATION_COUNT", "3")),
             daily_recommendation_provider=os.getenv("DAILY_RECOMMENDATION_PROVIDER", "hermes-agent").strip().lower(),
             hermes_reflection_provider=os.getenv("HERMES_REFLECTION_PROVIDER", "hermes-agent").strip().lower(),
+            hermes_native_profile_path=Path(os.getenv("HERMES_NATIVE_PROFILE_PATH", "memory/HERMES_NATIVE_PROFILE.md")),
+            hermes_soul_path=Path(os.getenv("HERMES_SOUL_PATH", "/home/ubuntu/.hermes/SOUL.md")),
+            hermes_native_profile_max_chars=int(os.getenv("HERMES_NATIVE_PROFILE_MAX_CHARS", "6000")),
             hermes_agent_command=os.getenv(
                 "HERMES_AGENT_COMMAND",
                 "/home/ubuntu/projects/hermes-agent/bin/reflect-json",

@@ -1,0 +1,312 @@
+# Hermes 主画像架构设计
+
+## 1. 核心结论
+
+长期目标采用“方案 C”：
+
+```text
+Hermes native memory = 主画像系统
+ai-reading-coach = 阅读业务账本、证据库、触达和反馈系统
+```
+
+这意味着 ARC 不应该把自己推断出的 `profile_items` 当作最高优先级的“用户本人画像”。ARC 可以保存阅读推荐、反馈、点击、阅读进度和审计记录，但用户长期偏好、思维模式、阶段状态和原生个人画像应优先由 Hermes 维护。
+
+当前 ARC 已经能维护一套结构化画像，但这套画像主要服务阅读推荐闭环。它有价值，但不能替代 Hermes 对用户跨场景、跨会话、跨任务的长期理解。
+
+## 2. 为什么不能只靠 ARC 自己画像
+
+ARC 当前画像来源主要是：
+
+```text
+data/reading_coach.db
+  -> profile_items
+  -> feedback_events
+  -> recommendations
+
+memory/USER.md
+memory/MEMORY.md
+```
+
+这套系统的问题是：
+
+- 数据来源只覆盖阅读推荐和反馈，不覆盖用户在 Hermes 原生 chat 中表达的长期目标、人格偏好、表达习惯和真实上下文。
+- 画像生成逻辑由 ARC prompt 和规则驱动，容易把阅读场景里的短期偏好误判成全局偏好。
+- ARC 的 reflection wrapper 当前明确禁止 Hermes 修改 memories，因此 Hermes 即使参与生成，也只是一次性 JSON 输出者。
+- Hermes UI、Hermes CLI 和 ARC 之间会出现多套 profile/memory，各自理解用户。
+
+用户的核心需求不是“ARC 生成更多画像”，而是“ARC 推荐和阅读系统更还原 Hermes 已经理解的那个我”。
+
+## 3. 目标分工
+
+| 组件 | 主职责 | 不应承担 |
+| --- | --- | --- |
+| Hermes native memory | 主用户画像、长期记忆、自我理解、跨场景偏好 | 业务事实数据库、飞书投递、幂等控制 |
+| ARC SQLite | 推荐记录、反馈事件、阅读进度、证据链、审计记录 | 最高优先级人格画像 |
+| ARC memory files | ARC 对阅读系统的已应用反思和策略记录 | Hermes 原生个人画像替代品 |
+| Hermes Web UI / CLI | 原生对话、长期记忆更新、画像解释 | ARC 业务页面和投递可靠性 |
+| ARC workflow | 定时、搜索、推荐展示、反馈采集、失败降级 | 黑箱式自动改写用户主画像 |
+
+主从关系：
+
+```text
+Hermes native profile
+  -> ARC 读取为最高优先级上下文
+
+ARC feedback events
+  -> 作为证据发送给 Hermes
+  -> Hermes 判断是否进入长期画像
+
+ARC profile_items
+  -> 阅读业务局部画像
+  -> 只作为低优先级补充或候选假设
+```
+
+## 4. 推荐调用链
+
+目标调用链：
+
+```text
+run-daily
+  -> ARC 读取业务事实
+       - 最近推荐
+       - 反馈事件
+       - 阅读进度
+       - 推荐失败/误读信号
+  -> ARC 读取 Hermes native profile snapshot
+       - SOUL.md
+       - Hermes memory export
+       - Hermes profile summary
+  -> ARC 调用 Hermes
+       - 请求 Hermes 基于原生画像和业务证据生成推荐意图/排序/解释
+       - 允许 Hermes 在专门的 profile-update route 中更新 native memory
+  -> ARC 写业务结果
+       - recommendations
+       - reading_packs
+       - delivery outbox
+       - run_logs
+```
+
+prompt 上下文必须显式分层：
+
+```text
+Priority 1: Hermes native profile
+Priority 2: User explicit ARC feedback
+Priority 3: ARC structured reading profile
+Priority 4: ARC inferred hypotheses
+Priority 5: Single-run weak signals
+```
+
+禁止把所有上下文混成一段“用户画像”，否则模型无法区分原生事实、业务事实、推断和假设。
+
+## 5. 反馈回写链路
+
+用户在飞书或 ARC 页面反馈后，ARC 应保存原始事实：
+
+```text
+feedback_events
+  - recommendation_id
+  - feedback_type
+  - reason_code
+  - free_text
+  - source channel
+  - created_at
+```
+
+然后把事件作为证据交给 Hermes：
+
+```text
+reading.feedback.ingest
+  input:
+    - feedback event
+    - related recommendation
+    - previous Hermes native profile summary
+    - recent ARC reading facts
+  output:
+    - whether native memory should update
+    - proposed memory delta
+    - confidence
+    - evidence ids
+```
+
+Hermes 可以自己维护主画像，但必须满足两个约束：
+
+- 只有明确反馈、多次行为或高价值自述才写入长期记忆。
+- 每次写入都要产生 ARC 可记录的审计事件，至少包括 route、摘要、证据、时间和状态。
+
+## 6. 当前 wrapper 需要调整的地方
+
+当前 `/home/ubuntu/projects/hermes-agent/bin/reflect-json` 的调用方式适合“安全 JSON 生成”，但不适合“让 Hermes 自己维护画像”，因为它明确包含：
+
+```text
+Do not modify files, databases, memories, messages, network channels, or apply patches.
+```
+
+因此需要新增一类 route，而不是直接改掉所有现有 route：
+
+| Route | 是否允许写 Hermes memory | 用途 |
+| --- | --- | --- |
+| `reading.recommend.intent` | 否 | 生成搜索/推荐主题 |
+| `reading.recommend.generate` | 否 | 生成候选推荐 |
+| `reading.fast_read_pack` | 否 | 生成阅读包 |
+| `reading.reflection.generate` | 否 | 生成 ARC reflection 草稿 |
+| `reading.feedback.ingest` | 是，受控 | 把明确反馈交给 Hermes 判断是否更新主画像 |
+| `reading.profile.sync_snapshot` | 否 | 从 Hermes 主画像生成 ARC 可读 snapshot |
+
+这样可以保留当前安全边界，同时给主画像更新开一个可审计、可限流、可回滚的专门通道。
+
+## 7. Hermes Native Profile Snapshot
+
+ARC 不应每次直接解析大量 Hermes chat 历史。更稳妥的是维护一个只读 snapshot：
+
+```text
+memory/HERMES_NATIVE_PROFILE.md
+```
+
+内容由 Hermes 原生画像导出或摘要生成：
+
+```markdown
+# HERMES_NATIVE_PROFILE
+
+## Stable Identity
+
+## Long-term Interests
+
+## Reading Preferences
+
+## Thinking Style
+
+## Current Stage
+
+## Aversion Patterns
+
+## Open Questions
+
+## Source Notes
+```
+
+ARC daily prompt 优先读取这个 snapshot。snapshot 只作为上下文，不直接覆盖 ARC SQLite。
+
+后续可以从这些来源生成 snapshot：
+
+- `/home/ubuntu/.hermes/SOUL.md`
+- Hermes native memory export
+- Hermes selected session summaries
+- 用户手动确认过的长期画像
+
+## 8. 防污染原则
+
+主画像系统最危险的问题是“模型把短期噪声写成长期事实”。必须执行以下规则：
+
+- 单次 dislike 不改长期画像，只记录为候选信号。
+- 单次 like 可增强主题置信度，但不直接定义稳定偏好。
+- 自由文本优先级高于按钮反馈。
+- 用户明确自述优先级高于模型推断。
+- ARC 推断永远低于 Hermes native profile。
+- 互相冲突时生成 `known_conflicts`，不要静默覆盖。
+- 自动写 Hermes memory 前必须有 evidence summary。
+- 敏感信息默认不写长期记忆。
+
+## 9. 实施阶段
+
+### Phase 1: 只读对齐
+
+目标：让 ARC 推荐先使用 Hermes 原生画像，不改变 Hermes memory。
+
+任务：
+
+- 新增 `HermesNativeProfileProvider`。
+- 读取 `memory/HERMES_NATIVE_PROFILE.md`。
+- 如果文件不存在，尝试从 `/home/ubuntu/.hermes/SOUL.md` 生成初始上下文。
+- 修改 daily profile context，把 Hermes native profile 放在最高优先级。
+- 保留 ARC `profile_items`，但标记为 `ARC inferred reading profile`。
+
+验收：
+
+- run-daily 的 prompt 中能看到 Hermes native profile 在最前面。
+- ARC 推荐理由明确映射到 native profile 或 ARC feedback。
+- native profile 缺失时系统降级，不阻断日推。
+
+### Phase 2: 反馈证据上送
+
+目标：ARC 把阅读反馈交给 Hermes 判断，不再只由 ARC 自己沉淀画像。
+
+任务：
+
+- 新增 `reading.feedback.ingest` route。
+- 反馈事件入库后异步调用 Hermes。
+- Hermes 返回 memory delta 和是否写入。
+- ARC 记录 `hermes_profile_update_events` 审计表或等价日志。
+
+验收：
+
+- 每条关键反馈都有可追踪的 Hermes ingest 结果。
+- 失败只记 warning，不影响反馈入库。
+- 没有证据的推断不写入 native memory。
+
+### Phase 3: Hermes 主画像写入
+
+目标：允许 Hermes 在受控 route 中维护 native memory。
+
+任务：
+
+- 移除 `reading.feedback.ingest` 的 memory 写入禁令。
+- 限制只允许该 route 写 Hermes memory。
+- 增加备份、审计和回滚。
+- 增加每日写入次数限制。
+
+验收：
+
+- Hermes native memory 出现可解释增量。
+- ARC 审计记录能说明“为什么写入”。
+- 写入失败不破坏 ARC 业务流程。
+
+### Phase 4: 主从收敛
+
+目标：ARC 不再把局部画像当成主画像，而是把它作为证据和业务视图。
+
+任务：
+
+- `profile_items` 增加 source/confidence/source_priority 语义。
+- 标记 `hermes_native`、`arc_explicit_feedback`、`arc_inferred`。
+- 推荐解释中展示来源层级。
+- 周报区分“原生画像变化”和“阅读业务画像变化”。
+
+验收：
+
+- 用户能看到某条画像来自 Hermes 原生记忆、明确反馈还是 ARC 推断。
+- 推荐错误能追溯是 native profile 错、ARC 推断错，还是候选书源错。
+
+## 10. 当前配置含义
+
+当前已开启：
+
+```env
+DAILY_REFLECTION_ENABLED=true
+HERMES_REFLECTION_AUTO_APPLY=true
+```
+
+这只表示：
+
+```text
+run-daily 后 ARC 会自动生成 reflection
+并自动写入 ARC memory/USER.md 和 memory/MEMORY.md
+```
+
+它不表示：
+
+```text
+Hermes native memory 会自动学习 ARC 反馈
+Hermes UI chat 的个人画像会自动同步到 ARC
+ARC 已经以 Hermes native profile 为主画像
+```
+
+因此这两个开关是 ARC 画像增强开关，不是主画像对齐方案。
+
+## 11. 最终验收标准
+
+- ARC daily recommendation 明确使用 Hermes native profile 作为最高优先级上下文。
+- ARC 不再把自己的 `profile_items` 伪装成用户完整画像。
+- Hermes 可以从 ARC 反馈中学习，但写入路径受控、可审计、可回滚。
+- 用户能区分原生画像、明确反馈、ARC 推断和待验证假设。
+- Hermes UI、Hermes CLI 和 ARC 对“用户是谁”的理解逐步收敛。
+- 任一组件失败时，原始反馈和推荐事实不会丢失。

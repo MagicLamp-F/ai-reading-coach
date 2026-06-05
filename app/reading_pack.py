@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from app.llm import OpenAIChatClient
-from app.memory import DEFAULT_LONG_TERM_MEMORY_MAX_CHARS, load_long_term_memory_context
+from app.memory import DEFAULT_LONG_TERM_MEMORY_MAX_CHARS, HermesNativeProfileProvider, build_daily_profile_context
+from app.memory import build_native_profile_seed_context
+from app.memory import load_long_term_memory_context
 from app.profile import build_profile_context
 from app.repository import ReadingPackDraft, Repository
 from app.source_collector import is_safe_book_source_url, source_quality_from_sources
@@ -285,6 +287,7 @@ class FastReadPackService:
         memory_dir: Path = Path("memory"),
         library_dir: Path = Path("library"),
         max_memory_chars: int = DEFAULT_LONG_TERM_MEMORY_MAX_CHARS,
+        hermes_native_profile_provider: HermesNativeProfileProvider | None = None,
         agent: HermesReadingPackAdapter | None = None,
         source_collector: Any | None = None,
     ):
@@ -293,6 +296,9 @@ class FastReadPackService:
         self.memory_dir = memory_dir
         self.library_dir = library_dir
         self.max_memory_chars = max_memory_chars
+        self.hermes_native_profile_provider = hermes_native_profile_provider or HermesNativeProfileProvider(
+            snapshot_path=memory_dir / "HERMES_NATIVE_PROFILE.md"
+        )
         self.agent = agent
         self.source_collector = source_collector
 
@@ -353,12 +359,8 @@ class FastReadPackService:
     def _generate_content(self, recommendation, sources: list[Any]) -> tuple[dict[str, Any], str, str | None]:
         prompt_context = self._prompt_context(recommendation, sources)
         if self.agent is not None:
-            try:
-                response = self.agent.generate_pack(prompt_context)
-                return _attach_source_refs(normalize_fast_read_pack(response, recommendation), sources), "generated", None
-            except Exception as exc:
-                logger.exception("Hermes deep read pack generation failed; using fallback pack")
-                return self._fallback_content(recommendation, sources), "fallback", str(exc)
+            response = self.agent.generate_pack(prompt_context)
+            return _attach_source_refs(normalize_fast_read_pack(response, recommendation), sources), "generated", None
         try:
             response = self.llm.complete_json(
                 "你是读书私教系统的深度压缩读书包生成器。只输出 JSON object。",
@@ -385,7 +387,17 @@ class FastReadPackService:
 
     def _prompt_context(self, recommendation, sources: list[Any] | None = None) -> str:
         memory_context = load_long_term_memory_context(self.memory_dir, self.max_memory_chars)
-        profile_context = _build_daily_profile_context(build_profile_context(self.repo), memory_context)
+        structured_profile_context = build_profile_context(self.repo)
+        profile_context = build_daily_profile_context(
+            hermes_native_profile_context=self.hermes_native_profile_provider.load_context(
+                seed_context=build_native_profile_seed_context(
+                    structured_profile_context=structured_profile_context,
+                    long_term_memory_context=memory_context,
+                )
+            ),
+            structured_profile_context=structured_profile_context,
+            long_term_memory_context=memory_context,
+        )
         metadata = _json_loads(recommendation["metadata_json"], {})
         return (
             f"route: {FAST_READ_PACK_ROUTE}\n"
@@ -956,15 +968,6 @@ def _json_loads(raw: str, default: Any) -> Any:
         return json.loads(raw or "")
     except json.JSONDecodeError:
         return default
-
-
-def _build_daily_profile_context(structured_profile_context: str, long_term_memory_context: str) -> str:
-    return (
-        "SQLite structured profile:\n"
-        f"{structured_profile_context.strip() or '暂无画像。'}\n\n"
-        "Hermes long-term memory:\n"
-        f"{long_term_memory_context.strip() or '暂无 Hermes long-term memory。'}"
-    )
 
 
 def _slugify(value: str) -> str:

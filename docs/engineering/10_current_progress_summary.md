@@ -1,6 +1,6 @@
 # 当前进展总结
 
-更新时间：2026-06-02
+更新时间：2026-06-05
 
 ## 一句话状态
 
@@ -17,6 +17,16 @@ AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP +
 -> SQLite 保存事实
 -> 下一次 daily run 回写画像
 -> 每周生成 7 天画像复盘
+```
+
+2026-06-05 新增 Hermes native profile Phase 1：`run-daily` 会优先读取 `memory/HERMES_NATIVE_PROFILE.md`，缺失或仅含“缺少个人阅读事实”占位时，通过 Hermes `reading.profile.sync_snapshot` 生成只读 snapshot。snapshot 的主证据来自 ARC SQLite reading profile 和 ARC applied memory；SOUL 只作为低优先级背景。daily prompt 现在按 Priority 1-5 显式分层：Hermes native profile、明确 ARC 反馈、ARC reading profile、ARC applied memory、单次弱信号。
+
+同日将 Hermes provider 改为严格模式：`DAILY_RECOMMENDATION_PROVIDER=hermes-agent`、`READING_PACK_PROVIDER=hermes-agent`、`HERMES_REFLECTION_PROVIDER=hermes-agent` 下，Hermes 失败会让对应 run 失败，不再静默 fallback。真实正常流程已验证：`daily run_id=48` 成功生成《活着》推荐和 Hermes deep read pack，`reflection run_id=49` 成功生成并自动应用 `reflection_id=4`。
+
+技术骨架、运行流程、配置和验证命令见：
+
+```text
+docs/engineering/21_technical_project_skeleton.md
 ```
 
 2026-06-02 已完成 Feishu `11232` 频控修复方向、delivery outbox、默认 Hermes provider、长快读包分段生成、ARC signed reading-pack URL、移动端阅读体验修复和线上 `reading_pack_id=31` 验证。详细总结见：
@@ -91,10 +101,10 @@ docs/engineering/15_current_scope_and_next_plan.md
 - `hermes-agent==0.14.0` 已安装到 `/home/ubuntu/projects/hermes-agent/.venv`。
 - Hermes CLI 可用：`hermes`、`hermes-agent`、`hermes-acp`。
 - 已在主项目中抽象 `ReflectionAgentAdapter`。
-- 已保留 `CustomLLMReflectionAdapter` 作为默认实现和 fallback。
+- 已保留 `CustomLLMReflectionAdapter` 作为默认实现；只有显式配置 `HERMES_REFLECTION_PROVIDER=hermes-agent-fallback` 才作为 fallback。
 - 已新增 `HermesAgentCliAdapter`，通过外部命令接入 Hermes。
 - 当前推荐命令为 `/home/ubuntu/projects/hermes-agent/bin/reflect-json`。
-- `reflect-json` 负责 stdin JSON 到 Hermes oneshot 调用的协议适配，并在失败时以非 0 退出，方便主项目 fallback。
+- `reflect-json` 负责 stdin JSON 到 Hermes oneshot 调用的协议适配，并在失败时以非 0 退出；正常 Hermes provider 会让 ARC run 失败。
 - `reflect-json --debug-smoke` 已能通过 Hermes 返回可见模型输出。
 - 主项目已通过 hermes-agent provider 生成 reflection draft：`id=3`，状态为 `draft`。
 - 默认模式下，`generate-reflection` 只生成 draft；`approve-reflection` 和 `apply-reflection` 保留为人工审查入口。
@@ -125,6 +135,17 @@ DAILY_RECOMMENDATION_PROVIDER=hermes-agent
 - 测试 run 的 `api_calls=0`，说明没有使用项目自己的 OpenAI client 生成 daily 推荐。
 - 已完成完整 Hermes 测试：`run_id=28`，推荐和快速读完包都走 Hermes，3 个 reading pack 状态均为 `generated`。
 - 已新增 source-aware candidate ranking：候选书写入 `recommendation_candidates`，最终推荐前先检查来源质量。
+- 2026-06-05 后正常 Hermes provider 为严格模式：Hermes daily route 返回空 stdout、无效 JSON 或无可用书籍时，`run-daily` 标记失败，不再写 fallback 推荐。
+
+### Hermes Native Profile Snapshot
+
+- 新增 `memory/HERMES_NATIVE_PROFILE.md` 作为 ARC 只读 native profile snapshot。
+- 新增 `HermesNativeProfileProvider`：
+  - 优先读取 snapshot。
+  - snapshot 缺失时调用 Hermes `reading.profile.sync_snapshot` 生成。
+  - 生成失败时让 daily run 失败，不再把 SOUL 原文冒充用户画像。
+- `/metrics` 暴露 `reading_coach_hermes_native_profile_loads_total`，按 `snapshot`、`generated_snapshot`、`soul_fallback`、`missing` 统计。
+- 2026-06-05 真实测试确认：当前 `/home/ubuntu/.hermes/SOUL.md` 是 Hermes Agent 身份说明，不是用户画像；后续已改为把 ARC evidence 传给 Hermes 生成 snapshot，并刷新出包含经典名著/高口碑文学/科幻、个人知识管理、软件工程实践和 AI Agent 商业化降频判断的可用画像。
 
 ### 快速读完包 MVP
 
@@ -158,6 +179,8 @@ READING_PACK_PROVIDER=hermes-agent
 DAILY_READING_PACKS_ENABLED=false
 ```
 
+- 2026-06-05 后，如果配置 `READING_PACK_PROVIDER=hermes-agent`，Hermes reading pack 失败会让 daily run 失败，不再写 `fallback` reading pack。
+
 ## 已验证
 
 自动化测试覆盖了以下关键点：
@@ -172,7 +195,7 @@ DAILY_READING_PACKS_ENABLED=false
 - 带原因反馈会写入 `feedback_events.reason_code`。
 - 自由文本补充会更新同一条反馈，并限制长度、转义 HTML。
 - 篡改签名会被拒绝。
-- reflection adapter 能向外部命令发送结构化契约，并在外部 agent 失败时 fallback。
+- reflection adapter 能向外部命令发送结构化契约；严格 Hermes provider 失败时记录 failed run，显式 fallback provider 仍有单元测试覆盖。
 - 当前主项目测试记录为 55 tests OK；Hermes/快速读完包改造后的记录为 67 tests OK；Tavily raw-content source grounding 接入后完整测试为 75 tests OK。
 - 快速读完包测试已覆盖新表、来源表、成功生成、fallback、推荐不存在、来源摘录进入 prompt、来源链接关系、飞书预览渲染和 daily 自动生成。
 - Hermes daily adapter 测试已覆盖 route payload 和 JSON 解析。
@@ -184,7 +207,7 @@ DAILY_READING_PACKS_ENABLED=false
 
 - 尚未升级为飞书应用机器人，当前反馈仍会打开浏览器页面。
 - 反馈去重和用户身份识别尚未实现；当前适合个人试运行。
-- Hermes reflection 链路已经接通；daily 推荐 Hermes 分支已完成单次真实测试，但还未连续观察推荐质量。
+- Hermes reflection 链路已经接通；daily 推荐 Hermes 分支已完成真实正常流程测试，但还未连续观察推荐质量。
 - OpenClaw Gateway / Skill 执行层尚未接入。
 - 快速读完包尚未接入公开业务页面；飞书里目前只展示预览和服务器 artifact 路径，不是可公网打开的阅读页面。
 - 画像类别还未覆盖能量状态、探索倾向、自我叙事等维度。
@@ -197,7 +220,7 @@ DAILY_READING_PACKS_ENABLED=false
 
 1. 确认服务器 `.env`、飞书 webhook、反馈服务公网入口和 systemd timer。
 2. 连续运行 7 天 daily/weekly，观察 run log、飞书推送、反馈写入和 SQLite 备份。
-3. 每天检查 reading pack 是否阻断日推；理论上不应阻断，只应写 warning 或 fallback。
+3. 每天检查 reading pack 是否阻断日推；严格 Hermes provider 下失败应及时暴露并修复，不应静默 fallback。
 4. 7 天后复盘真实反馈，决定是否调整原因选项、画像更新规则和推荐 prompt。
 
 ### P0：来源收集 v2

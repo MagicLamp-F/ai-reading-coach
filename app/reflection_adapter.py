@@ -180,7 +180,13 @@ def build_reflection_adapter(
     normalized = provider.strip().lower()
     if normalized in {"", "custom", "custom-llm"}:
         return custom
-    if normalized in {"hermes-agent", "hermes_agent", "auto"}:
+    if normalized in {"hermes-agent", "hermes_agent", "hermes"}:
+        hermes = HermesAgentCliAdapter(
+            command=hermes_agent_command,
+            timeout_seconds=hermes_agent_timeout_seconds,
+        )
+        return hermes
+    if normalized in {"hermes-agent-fallback", "hermes_agent_fallback", "auto"}:
         hermes = HermesAgentCliAdapter(
             command=hermes_agent_command,
             timeout_seconds=hermes_agent_timeout_seconds,

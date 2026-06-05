@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from app.db import connect, init_db
+from app.memory import HermesNativeProfileProvider
 from app.repository import BookSourceDraft, Repository
 from app.workflow import FALLBACK_BOOKS
 from app.workflow import ReadingCoachWorkflow
@@ -429,7 +430,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(all(Path(path).exists() for path in artifact_paths))
             conn.close()
 
-    def test_daily_run_sends_recommendation_even_when_reading_pack_falls_back(self):
+    def test_daily_run_fails_when_hermes_reading_pack_agent_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             conn = connect(tmp_path / "test.db")
@@ -454,18 +455,19 @@ class WorkflowTests(unittest.TestCase):
                 reading_pack_agent=ExplodingReadingPackAgent(),
             )
 
-            run_id = workflow.run_daily_recommendations()
+            with self.assertRaises(RuntimeError):
+                workflow.run_daily_recommendations()
 
-            run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
-            recommendation = conn.execute("SELECT * FROM recommendations WHERE run_id = ?", (run_id,)).fetchone()
-            pack = conn.execute("SELECT * FROM reading_packs WHERE recommendation_id = ?", (recommendation["id"],)).fetchone()
-            self.assertEqual(run["status"], "success")
-            self.assertEqual(recommendation["message_id"], "rec-1")
-            self.assertEqual(len(lark.reading_pack_previews), 1)
-            self.assertIsNotNone(lark.reading_pack_previews[0])
+            run = conn.execute("SELECT * FROM run_logs ORDER BY id DESC LIMIT 1").fetchone()
+            recommendation = conn.execute("SELECT * FROM recommendations WHERE run_id = ?", (run["id"],)).fetchone()
+            pack_count = conn.execute("SELECT COUNT(*) AS count FROM reading_packs").fetchone()["count"]
+            self.assertEqual(run["status"], "failed")
+            self.assertIn("reading pack unavailable", run["error_message"])
+            self.assertIsNotNone(recommendation)
+            self.assertIsNone(recommendation["message_id"])
+            self.assertEqual(len(lark.reading_pack_previews), 0)
             self.assertEqual(len(lark.sent_reading_pack_previews), 0)
-            self.assertEqual(pack["status"], "fallback")
-            self.assertIn("reading pack unavailable", pack["error_message"])
+            self.assertEqual(pack_count, 0)
             conn.close()
 
     def test_daily_run_source_aware_selects_only_source_qualified_candidates(self):
@@ -551,6 +553,10 @@ class WorkflowTests(unittest.TestCase):
             tmp_path = Path(tmp)
             memory_dir = tmp_path / "memory"
             memory_dir.mkdir()
+            (memory_dir / "HERMES_NATIVE_PROFILE.md").write_text(
+                "# HERMES_NATIVE_PROFILE\n\nReading Preferences: 经典文学和高口碑科幻",
+                encoding="utf-8",
+            )
             (memory_dir / "USER.md").write_text("# USER\n\n稳定偏好：系统设计书籍", encoding="utf-8")
             (memory_dir / "MEMORY.md").write_text("# MEMORY\n\n下周策略：减少趋势报告", encoding="utf-8")
             (memory_dir / "reflections").mkdir()
@@ -581,9 +587,12 @@ class WorkflowTests(unittest.TestCase):
 
             self.assertEqual(len(llm.prompts), 2)
             for _, user_prompt in llm.prompts:
-                self.assertIn("SQLite structured profile", user_prompt)
-                self.assertIn("Hermes long-term memory", user_prompt)
+                self.assertIn("Priority 1: Hermes native profile snapshot", user_prompt)
+                self.assertIn("Priority 3: ARC inferred reading profile", user_prompt)
+                self.assertIn("Priority 4: ARC applied reflection memory", user_prompt)
+                self.assertLess(user_prompt.index("Reading Preferences"), user_prompt.index("偏好工程实践"))
                 self.assertIn("偏好工程实践", user_prompt)
+                self.assertIn("经典文学和高口碑科幻", user_prompt)
                 self.assertIn("稳定偏好：系统设计书籍", user_prompt)
                 self.assertIn("下周策略：减少趋势报告", user_prompt)
                 self.assertNotIn("draft-only signal", user_prompt)
@@ -608,12 +617,17 @@ class WorkflowTests(unittest.TestCase):
                 max_search_calls=3,
                 max_model_calls=2,
                 memory_dir=tmp_path / "missing-memory",
+                hermes_native_profile_provider=HermesNativeProfileProvider(
+                    snapshot_path=tmp_path / "missing-native.md",
+                    fallback_soul_path=tmp_path / "missing-soul.md",
+                ),
             )
 
             run_id = workflow.run_daily_recommendations()
 
             run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
             self.assertEqual(run["status"], "success")
+            self.assertIn("暂无 Hermes native profile snapshot", llm.prompts[0][1])
             self.assertIn("暂无 Hermes long-term memory", llm.prompts[0][1])
             conn.close()
 

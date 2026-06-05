@@ -14,7 +14,9 @@
 - OpenAI 兼容 Chat Completions 生成主题和推荐；无 Key 或调用失败时自动使用保守默认主题和降级推荐。
 - 每天按 `.env` 的 `DAILY_PUSH_TIME` 推送。
 - 每周日 20:00 推送 7 天画像复盘。
-- Hermes reflection 支持可插拔 adapter：默认使用当前 custom reflection；可切换到外部 `hermes-agent`，失败时回退到 custom reflection，草稿仍需人工审批后才会写入长期记忆。
+- 日推会优先读取 Hermes native profile snapshot（默认 `memory/HERMES_NATIVE_PROFILE.md`）；缺失或仅含占位信息时，会让 Hermes 基于 ARC 阅读画像和已应用 memory 生成 snapshot，再进入推荐。
+- Hermes provider 默认严格失败：配置 `hermes-agent` 后，如果 Hermes route 无输出或无效 JSON，任务会失败并记录错误，不再静默生成 fallback 内容。
+- Hermes reflection 支持可插拔 adapter：默认可用 custom reflection；切换到外部 `hermes-agent` 后走严格模式，失败会记录 failed run，不再静默回退。只有显式配置 `hermes-agent-fallback` 才允许回退到 custom。
 - `/metrics` 暴露基础 Prometheus 指标，默认端口 `9108`。
 - 提供 systemd service/timer 和 SQLite 备份脚本，支持 7 天服务器试运行。
 
@@ -43,6 +45,9 @@ FEEDBACK_SECRET=change-me
 OPENAI_API_KEY=sk-xxx
 TAVILY_API_KEY=tvly-xxx
 HERMES_REFLECTION_PROVIDER=custom
+HERMES_NATIVE_PROFILE_PATH=memory/HERMES_NATIVE_PROFILE.md
+HERMES_SOUL_PATH=/home/ubuntu/.hermes/SOUL.md
+HERMES_NATIVE_PROFILE_MAX_CHARS=6000
 HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
 ```
 
@@ -86,8 +91,10 @@ python3 scripts/backup_sqlite.py
 ```env
 HERMES_REFLECTION_PROVIDER=hermes-agent
 HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
-HERMES_AGENT_TIMEOUT_SECONDS=60
+HERMES_AGENT_TIMEOUT_SECONDS=180
 ```
+
+注意：不要设置无效的 `HERMES_INFERENCE_PROVIDER` / `HERMES_INFERENCE_MODEL` 覆盖项；例如 `provider=custom` 但没有 `CUSTOM_BASE_URL` 会导致 Hermes 返回空输出。
 
 回滚到当前自研 reflection：
 

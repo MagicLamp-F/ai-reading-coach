@@ -7,6 +7,7 @@ from app.reflection_adapter import (
     FallbackReflectionAdapter,
     HermesAgentCliAdapter,
     ReflectionAdapterError,
+    build_reflection_adapter,
 )
 
 
@@ -107,6 +108,16 @@ class ReflectionAdapterTests(unittest.TestCase):
         self.assertEqual(result.provider, "static")
         self.assertEqual(result.response["period_summary"], "fallback")
         self.assertIn("failing failed", result.warnings[0])
+
+    def test_hermes_agent_provider_is_strict(self):
+        adapter = build_reflection_adapter("hermes-agent", FakeLLM(), "/tmp/hermes-route", 12)
+
+        self.assertIsInstance(adapter, HermesAgentCliAdapter)
+
+    def test_explicit_fallback_provider_wraps_custom(self):
+        adapter = build_reflection_adapter("hermes-agent-fallback", FakeLLM(), "/tmp/hermes-route", 12)
+
+        self.assertIsInstance(adapter, FallbackReflectionAdapter)
 
 
 if __name__ == "__main__":

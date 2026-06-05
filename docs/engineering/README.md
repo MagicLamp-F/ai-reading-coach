@@ -34,7 +34,9 @@
 18. [书源驱动阅读计划与每日伴读包需求评估](./17_source_driven_reading_plan_design.md)：评估用户提供书源、配置阅读天数或每日分钟数、每日生成待读片段和伴读快读包的用途、优劣、适用边界和 MVP 收敛方式。
 19. [渐进式导读伴读体验设计](./18_progressive_guided_reading_experience_design.md)：面向低耐心阅读状态，设计第一版短导读启动、第二版自适应伴读、追剧式阅读和核心页面体验。
 20. [渐进式导读伴读操作手册](./19_guided_reading_user_operation_manual.md)：说明如何在页面导入 EPUB/Markdown/TXT 书源、管理书源、创建阅读计划、阅读每日导读、提交反馈和启用飞书推送。
-21. [2026-06-02 Hermes / ARC / Feishu 总结](./development_history/2026-06-02_hermes_arc_delivery_and_reading_ui_summary.md)：总结 Hermes 默认生成、长快读包、ARC 阅读页、飞书投递可靠性、移动端阅读体验修复、验证结果和 GitHub 认证恢复步骤。
+21. [Hermes 主画像架构设计](./20_hermes_primary_profile_architecture.md)：定义 Hermes native memory 作为主画像、ARC 作为阅读业务账本的方案 C，说明画像主从关系、反馈上送、写入审计和分阶段实施计划。
+22. [技术项目骨架与运行流程](./21_technical_project_skeleton.md)：说明目录职责、正常日推链路、画像优先级、Hermes 严格模式、关键配置、验证命令和大改后的文档/提交规则。
+23. [2026-06-02 Hermes / ARC / Feishu 总结](./development_history/2026-06-02_hermes_arc_delivery_and_reading_ui_summary.md)：总结 Hermes 默认生成、长快读包、ARC 阅读页、飞书投递可靠性、移动端阅读体验修复、验证结果和 GitHub 认证恢复步骤。
 
 新增 systemd 单元：
 

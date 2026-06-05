@@ -100,7 +100,13 @@ class ReadingPackTests(unittest.TestCase):
                 )
             )
             llm = PackLLM()
-            service = FastReadPackService(repo, llm, memory_dir=tmp_path / "memory", library_dir=tmp_path / "library")
+            memory_dir = tmp_path / "memory"
+            memory_dir.mkdir()
+            (memory_dir / "HERMES_NATIVE_PROFILE.md").write_text(
+                "# HERMES_NATIVE_PROFILE\n\nReading Preferences: 深读业务系统和经典文本",
+                encoding="utf-8",
+            )
+            service = FastReadPackService(repo, llm, memory_dir=memory_dir, library_dir=tmp_path / "library")
 
             result = service.generate_for_recommendation(1)
 
@@ -125,6 +131,8 @@ class ReadingPackTests(unittest.TestCase):
             self.assertEqual(result.preview.source_count, 1)
             self.assertEqual(repo.reading_pack_sources(result.reading_pack_id)[0]["id"], source_id)
             self.assertIn("User profile context", llm.user_prompt)
+            self.assertIn("Priority 1: Hermes native profile snapshot", llm.user_prompt)
+            self.assertIn("深读业务系统和经典文本", llm.user_prompt)
             self.assertIn("Book source excerpts", llm.user_prompt)
             self.assertIn("反馈闭环、系统边界和维护机制", llm.user_prompt)
 

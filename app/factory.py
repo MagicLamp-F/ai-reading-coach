@@ -8,6 +8,7 @@ from app.db import connect, init_db
 from app.http_client import HttpClient
 from app.lark import LarkRobotClient
 from app.llm import OpenAIChatClient
+from app.memory import HermesNativeProfileProvider
 from app.reflection_adapter import ReflectionAgentAdapter, build_reflection_adapter
 from app.reading_pack import HermesReadingPackAdapter, build_reading_pack_agent
 from app.repository import Repository
@@ -76,6 +77,13 @@ def build_context(settings: Settings) -> AppContext:
         hermes_agent_command=settings.hermes_agent_command,
         hermes_agent_timeout_seconds=settings.hermes_agent_timeout_seconds,
     )
+    hermes_native_profile_provider = HermesNativeProfileProvider(
+        snapshot_path=settings.hermes_native_profile_path,
+        fallback_soul_path=settings.hermes_soul_path,
+        max_chars=settings.hermes_native_profile_max_chars,
+        generator_command=settings.hermes_agent_command,
+        generator_timeout_seconds=settings.hermes_agent_timeout_seconds,
+    )
     workflow = ReadingCoachWorkflow(
         repo=repo,
         search=search,
@@ -88,6 +96,7 @@ def build_context(settings: Settings) -> AppContext:
         max_search_calls=settings.max_daily_search_calls,
         max_model_calls=settings.max_daily_model_calls,
         daily_recommendation_count=settings.daily_recommendation_count,
+        hermes_native_profile_provider=hermes_native_profile_provider,
         reading_packs_enabled=settings.daily_reading_packs_enabled,
         reading_pack_library_dir=settings.reading_pack_library_dir,
         daily_recommendation_agent=daily_recommendation_agent,

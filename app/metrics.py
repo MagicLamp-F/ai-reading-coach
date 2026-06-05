@@ -3,6 +3,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 
+from app.memory import hermes_native_profile_load_metrics
 from app.repository import Repository
 
 
@@ -42,13 +43,24 @@ def _render_metrics(repo: Repository) -> str:
     run_rows = conn.execute("SELECT status, COUNT(*) AS count FROM run_logs GROUP BY status").fetchall()
     feedback_rows = conn.execute("SELECT feedback_type, COUNT(*) AS count FROM feedback_events GROUP BY feedback_type").fetchall()
     profile_count = conn.execute("SELECT COUNT(*) AS count FROM profile_items").fetchone()["count"]
+    native_profile_loads = hermes_native_profile_load_metrics()
     lines = [
         "# HELP reading_coach_profile_items Total profile items.",
         "# TYPE reading_coach_profile_items gauge",
         f"reading_coach_profile_items {profile_count}",
-        "# HELP reading_coach_runs_total Total workflow runs by status.",
-        "# TYPE reading_coach_runs_total counter",
+        "# HELP reading_coach_hermes_native_profile_loads_total Hermes native profile context loads by source.",
+        "# TYPE reading_coach_hermes_native_profile_loads_total counter",
     ]
+    lines.extend(
+        f'reading_coach_hermes_native_profile_loads_total{{source="{source}"}} {count}'
+        for source, count in sorted(native_profile_loads.items())
+    )
+    lines.extend(
+        [
+            "# HELP reading_coach_runs_total Total workflow runs by status.",
+            "# TYPE reading_coach_runs_total counter",
+        ]
+    )
     lines.extend(f'reading_coach_runs_total{{status="{row["status"]}"}} {row["count"]}' for row in run_rows)
     lines.extend(
         [
@@ -61,4 +73,3 @@ def _render_metrics(repo: Repository) -> str:
         for row in feedback_rows
     )
     return "\n".join(lines) + "\n"
-
