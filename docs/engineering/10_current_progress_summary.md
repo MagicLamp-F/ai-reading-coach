@@ -1,6 +1,6 @@
 # 当前进展总结
 
-更新时间：2026-06-05
+更新时间：2026-06-07
 
 ## 一句话状态
 
@@ -26,6 +26,8 @@ AI 读书私教系统已经从早期 Telegram MVP 推进到“飞书优先 MVP +
 同日将 Hermes provider 改为严格模式：`DAILY_RECOMMENDATION_PROVIDER=hermes-agent`、`READING_PACK_PROVIDER=hermes-agent`、`HERMES_REFLECTION_PROVIDER=hermes-agent` 下，Hermes 失败会让对应 run 失败，不再静默 fallback。真实正常流程已验证：`daily run_id=48` 成功生成《活着》推荐和 Hermes deep read pack，`reflection run_id=49` 成功生成并自动应用 `reflection_id=4`。
 
 Hermes native USER memory 同步后的真实正常流程也已验证：`daily run_id=50` 成功推荐《额尔古纳河右岸》，`reading_pack id=37` 由 `hermes-agent` 生成，`reflection run_id=51` 成功生成并自动应用 `reflection_id=5`；`/home/ubuntu/.hermes/memories/USER.md` 出现 596 字符的 `[arc-reading-profile]` entry。
+
+2026-06-07 继续完成 Hermes 主画像反馈 ingest：`run-daily` 开始处理未处理反馈时，会调用 Hermes `reading.feedback.ingest`，由 Hermes 判断是否更新主画像；ARC 记录 `hermes_profile_update_events` 审计，并只受控 upsert Hermes native `USER.md` 的 `[arc-reading-profile]` entry。失败会记录 `failed` 审计并让本次 run 失败，不走 fallback，也不会把反馈标记 processed。真实正常流程已验证：通过正常 HTTP 反馈入口写入 `feedback_events.id=27` 后，`daily run_id=56` 成功处理 `processed_feedback=1`，Hermes 审计 `hermes_profile_update_events.id=1 status=applied confidence=0.91`，生成推荐《围城》，`reading_pack id=40` 由 `hermes-agent` 生成，`reflection run_id=57` 自动应用 `reflection_id=8`。
 
 技术骨架、运行流程、配置和验证命令见：
 
@@ -60,8 +62,9 @@ docs/engineering/15_current_scope_and_next_plan.md
 - SQLite schema 已包含 `profile_items`、`books`、`recommendations`、`feedback_events`、`run_logs`、`cost_logs`。
 - 用户说明书可通过 `seed-profile` 导入为初始画像。
 - `run-daily` 会先处理未回写反馈，再生成主题、搜索资料、生成 3 本推荐、写入推荐记录并推送。
-- 外部模型或搜索不可用时，会使用默认主题和内置降级书单，保证流程可跑通。
+- 正常 Hermes provider 严格失败，不再用 fallback 掩盖 Hermes route 错误；旧 fallback 行为只保留在显式 fallback 或局部单元测试场景。
 - 反馈会按 `feedback_type + reason_code` 更新画像条目，保留证据来源。
+- 反馈还会先送入 Hermes `reading.feedback.ingest`，由 Hermes 对 native USER memory 更新做决策，并写 `hermes_profile_update_events` 审计。
 
 ### 飞书优先通道
 
@@ -153,6 +156,15 @@ DAILY_RECOMMENDATION_PROVIDER=hermes-agent
 - `/metrics` 暴露 `reading_coach_hermes_native_profile_loads_total`，按 `snapshot`、`generated_snapshot`、`soul_fallback`、`missing` 统计。
 - 2026-06-05 真实测试确认：当前 `/home/ubuntu/.hermes/SOUL.md` 是 Hermes Agent 身份说明，不是用户画像；后续已改为把 ARC evidence 传给 Hermes 生成 snapshot，并刷新出包含经典名著/高口碑文学/科幻、个人知识管理、软件工程实践和 AI Agent 商业化降频判断的可用画像。
 
+### Hermes Feedback Ingest
+
+- 新增 `app/profile_ingest.py`，通过 Hermes route `reading.feedback.ingest` 和 `profile_update_v1` 输出契约处理反馈。
+- 新增 `hermes_profile_update_events` 审计表，记录 `applied/skipped/failed`、native memory path、memory entry、rationale、confidence、evidence summary、错误和原始响应。
+- `process_feedback()` 在 ARC `profile_items` 更新前调用 Hermes ingest；成功后写审计，失败时写 `failed` 审计并抛错，反馈保持未处理。
+- `/metrics` 暴露 `reading_coach_hermes_profile_updates_total{status=...}`。
+- 新增 `show-hermes-profile-sync` CLI，查看 `memory/HERMES_NATIVE_PROFILE.md` 和 `/home/ubuntu/.hermes/memories/USER.md` 的同步状态。
+- `/home/ubuntu/projects/hermes-agent/bin/reflect-json` 已补 `profile_update_v1` 标准化；该文件不在 ARC git 仓库内，需要外部环境单独维护。
+
 ### 快速读完包 MVP
 
 - 新增 `artifacts` 表，用于保存长文本产物路径、hash、类型和元数据。
@@ -208,6 +220,8 @@ DAILY_READING_PACKS_ENABLED=false
 - Tavily key 文件读取和 source collector search enrichment 已有单元测试；真实 Tavily smoke 已确认 key 文件可读取、advanced raw-content search 返回结果，并能把 `Monetizing Innovation` 的来源质量提升到 `source_usable`。
 - Source-aware candidate ranking 已完成受控 smoke：临时数据库、禁用飞书、禁用 reading pack，Hermes 生成 3 个候选，其中 2 个达到 `source_usable` 并被推荐，1 个 `source_limited` 被拒绝。
 - 真实 daily run `run_id=32` 已完成 source-aware 全链路：3 个候选全部 `source_rich` 并入选，3 个 reading pack 均由 `hermes-agent` 生成，无 run warning。后续修正了 reading pack 只取 3 条来源的问题，重生成推荐 `54` 后 source quality 为 `source_rich`。
+- 2026-06-07 完整测试为 `130 tests OK`。
+- 真实正常流程确认 Hermes 会构造主画像更新：`feedback_events.id=27` 通过 HTTP `/feedback/inline` 写入；`run-daily` 中 Hermes `reading.feedback.ingest` 返回 `applied`，审计 `hermes_profile_update_events.id=1`，并同步 native USER memory。
 
 ## 尚未完成
 

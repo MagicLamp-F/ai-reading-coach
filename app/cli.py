@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.feedback import build_guided_reading_day_url
 from app.guided_reading import GuidedReadingError, GuidedReadingService
 from app.logging_setup import configure_logging
 from app.metrics import MetricsServer
+from app.memory import hermes_profile_sync_status
 from app.poller import TelegramPoller
 from app.profile import seed_user_manual
 from app.reading_pack import FastReadPackService
@@ -44,6 +46,10 @@ def main() -> None:
     resend.add_argument("--limit", type=int, default=20, help="Maximum pending deliveries to retry")
     resend.add_argument("--max-attempts", type=int, default=5, help="Mark a delivery failed after this many retries")
     subparsers.add_parser("run-weekly-report", help="Send one weekly profile report")
+
+    profile_sync = subparsers.add_parser("show-hermes-profile-sync", help="Show Hermes native profile sync status")
+    profile_sync.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    profile_sync.add_argument("--preview-chars", type=int, default=700, help="Maximum synced entry preview chars")
 
     reading_pack = subparsers.add_parser("generate-reading-pack", help="Generate a deep read pack for a recommendation")
     reading_pack.add_argument("--recommendation-id", type=int, required=True, help="Recommendation id")
@@ -127,6 +133,18 @@ def main() -> None:
         conn = connect(settings.database_path)
         init_db(conn)
         print(f"Initialized database: {settings.database_path}")
+        return
+
+    if args.command == "show-hermes-profile-sync":
+        status = hermes_profile_sync_status(
+            snapshot_path=settings.hermes_native_profile_path,
+            native_user_memory_path=settings.hermes_native_user_memory_path,
+            preview_chars=args.preview_chars,
+        )
+        if args.json:
+            print(json.dumps(status, ensure_ascii=False, indent=2))
+        else:
+            print(format_hermes_profile_sync_status(status))
         return
 
     context = build_context(settings)
@@ -310,6 +328,27 @@ def _run_daily_reflection(context, settings: Settings, daily_run_id: int) -> Non
 
     mode = "auto-applied" if settings.hermes_reflection_auto_apply else "draft"
     logger.info("Daily reflection completed after run_id=%s: reflection_id=%s mode=%s", daily_run_id, reflection_id, mode)
+
+
+def format_hermes_profile_sync_status(status: dict[str, object]) -> str:
+    lines = [
+        "Hermes profile sync status",
+        f"- snapshot_path: {status['snapshot_path']}",
+        f"- snapshot_exists: {status['snapshot_exists']}",
+        f"- snapshot_chars: {status['snapshot_chars']}",
+        f"- snapshot_mtime: {status['snapshot_mtime'] or '(missing)'}",
+        f"- native_user_memory_path: {status['native_user_memory_path'] or '(disabled)'}",
+        f"- native_user_memory_enabled: {status['native_user_memory_enabled']}",
+        f"- native_user_memory_exists: {status['native_user_memory_exists']}",
+        f"- native_user_memory_chars: {status['native_user_memory_chars']}",
+        f"- native_user_memory_mtime: {status['native_user_memory_mtime'] or '(missing)'}",
+        f"- arc_entry_present: {status['arc_entry_present']}",
+        f"- arc_entry_chars: {status['arc_entry_chars']}",
+    ]
+    preview = str(status.get("arc_entry_preview") or "")
+    if preview:
+        lines.extend(["", "arc_entry_preview:", preview])
+    return "\n".join(lines)
 
 
 def _load_env_file(path: Path) -> None:

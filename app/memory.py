@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
-import json
 import shlex
 import subprocess
 import tempfile
@@ -222,6 +222,45 @@ def hermes_native_profile_load_metrics() -> dict[str, int]:
         return dict(_NATIVE_PROFILE_LOAD_COUNTS)
 
 
+def hermes_profile_sync_status(
+    snapshot_path: Path,
+    native_user_memory_path: Path | None,
+    preview_chars: int = 700,
+) -> dict[str, object]:
+    snapshot_text = _read_memory_file(snapshot_path, 100_000)
+    status: dict[str, object] = {
+        "snapshot_path": str(snapshot_path),
+        "snapshot_exists": bool(snapshot_text),
+        "snapshot_chars": len(snapshot_text),
+        "snapshot_mtime": _path_mtime(snapshot_path),
+        "native_user_memory_path": str(native_user_memory_path) if native_user_memory_path else "",
+        "native_user_memory_enabled": native_user_memory_path is not None,
+        "native_user_memory_exists": False,
+        "native_user_memory_chars": 0,
+        "native_user_memory_mtime": "",
+        "arc_entry_present": False,
+        "arc_entry_chars": 0,
+        "arc_entry_preview": "",
+    }
+    if native_user_memory_path is None:
+        return status
+
+    entries = _read_hermes_memory_entries(native_user_memory_path)
+    content = HERMES_MEMORY_ENTRY_DELIMITER.join(entries)
+    arc_entry = next((entry for entry in entries if HERMES_NATIVE_USER_MEMORY_MARKER in entry), "")
+    status.update(
+        {
+            "native_user_memory_exists": native_user_memory_path.exists(),
+            "native_user_memory_chars": len(content),
+            "native_user_memory_mtime": _path_mtime(native_user_memory_path),
+            "arc_entry_present": bool(arc_entry),
+            "arc_entry_chars": len(arc_entry),
+            "arc_entry_preview": _truncate(arc_entry, preview_chars) if arc_entry else "",
+        }
+    )
+    return status
+
+
 def _read_memory_file(path: Path, read_limit: int) -> str:
     if not path.exists() or not path.is_file():
         return ""
@@ -231,6 +270,19 @@ def _read_memory_file(path: Path, read_limit: int) -> str:
     except OSError as exc:
         logger.warning("Hermes memory file read failed: path=%s error=%s", path, exc)
         return ""
+
+
+def _path_mtime(path: Path) -> str:
+    try:
+        return datetime_from_timestamp(path.stat().st_mtime)
+    except OSError:
+        return ""
+
+
+def datetime_from_timestamp(timestamp: float) -> str:
+    from datetime import datetime
+
+    return datetime.fromtimestamp(timestamp).isoformat(timespec="seconds")
 
 
 def _record_native_profile_load(source: str) -> None:

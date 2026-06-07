@@ -99,6 +99,21 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("next_attempt_at", outbox_columns)
         self.assertIn("attempt_count", outbox_columns)
 
+    def test_init_db_creates_hermes_profile_update_audit_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            init_db(conn)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(hermes_profile_update_events)")}
+            indexes = {row["name"] for row in conn.execute("PRAGMA index_list(hermes_profile_update_events)")}
+            conn.close()
+
+        self.assertIn("feedback_event_id", columns)
+        self.assertIn("status", columns)
+        self.assertIn("memory_entry", columns)
+        self.assertIn("raw_response_json", columns)
+        self.assertIn("idx_hermes_profile_update_feedback", indexes)
+        self.assertIn("idx_hermes_profile_update_status", indexes)
+
 
 if __name__ == "__main__":
     unittest.main()

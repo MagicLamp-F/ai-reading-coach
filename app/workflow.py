@@ -17,6 +17,7 @@ from app.memory import build_daily_profile_context as build_prioritized_daily_pr
 from app.memory import build_native_profile_seed_context
 from app.memory import load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
+from app.profile_ingest import FeedbackProfileIngestor
 from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview
 from app.repository import DeliveryOutboxDraft, RecommendationCandidateDraft, RecommendationDraft, Repository
 from app.search import SearchResult, TavilySearch
@@ -112,6 +113,7 @@ class ReadingCoachWorkflow:
         source_aware_candidate_count: int = 6,
         source_min_coverage_score: float = 0.5,
         source_aware_allow_limited_fill: bool = False,
+        profile_ingestor: FeedbackProfileIngestor | None = None,
     ):
         self.repo = repo
         self.search = search
@@ -139,12 +141,13 @@ class ReadingCoachWorkflow:
         self.source_aware_candidate_count = source_aware_candidate_count
         self.source_min_coverage_score = source_min_coverage_score
         self.source_aware_allow_limited_fill = source_aware_allow_limited_fill
+        self.profile_ingestor = profile_ingestor
 
     def run_daily_recommendations(self) -> int:
         run_id = self.repo.create_run("daily_recommendation", {"channel": self.channel})
         api_calls = 0
         try:
-            processed_feedback = process_feedback(self.repo)
+            processed_feedback = process_feedback(self.repo, profile_ingestor=self.profile_ingestor)
             structured_profile_context = build_profile_context(self.repo)
             long_term_memory_context = load_long_term_memory_context(self.memory_dir, self.max_memory_chars)
             profile_context = build_daily_profile_context(

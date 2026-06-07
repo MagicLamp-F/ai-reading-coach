@@ -15,6 +15,7 @@
 - 每天按 `.env` 的 `DAILY_PUSH_TIME` 推送。
 - 每周日 20:00 推送 7 天画像复盘。
 - 日推会优先读取 Hermes native profile snapshot（默认 `memory/HERMES_NATIVE_PROFILE.md`）；缺失或仅含占位信息时，会让 Hermes 基于 ARC 阅读画像和已应用 memory 生成 snapshot，再进入推荐。
+- 未处理反馈会在下一次 `run-daily` 开始时交给 Hermes `reading.feedback.ingest` 判断是否更新主画像；ARC 记录 `hermes_profile_update_events` 审计，并只受控写入 Hermes native `USER.md` 的 `[arc-reading-profile]` entry。
 - Hermes provider 默认严格失败：配置 `hermes-agent` 后，如果 Hermes route 无输出或无效 JSON，任务会失败并记录错误，不再静默生成 fallback 内容。
 - Hermes reflection 支持可插拔 adapter：默认可用 custom reflection；切换到外部 `hermes-agent` 后走严格模式，失败会记录 failed run，不再静默回退。只有显式配置 `hermes-agent-fallback` 才允许回退到 custom。
 - `/metrics` 暴露基础 Prometheus 指标，默认端口 `9108`。
@@ -76,6 +77,7 @@ python3 -m app.cli init-db
 python3 -m app.cli seed-profile --file prompts/user_manual.example.md
 python3 -m app.cli run-daily
 python3 -m app.cli run-server --host 0.0.0.0 --port 8000
+python3 -m app.cli show-hermes-profile-sync --json
 python3 -m app.cli run-weekly-report
 python3 -m app.cli generate-reflection --days 7
 python3 -m app.cli list-reflections
@@ -115,6 +117,7 @@ python3 -m app.cli run-scheduler
 - `books`：书籍去重信息。
 - `recommendations`：每日推荐记录。
 - `feedback_events`：飞书反馈链接或 Telegram 按钮反馈，含反馈类型、原因和自由文本。
+- `hermes_profile_update_events`：Hermes feedback ingest 审计，记录画像更新决策、证据摘要、状态和错误。
 - `run_logs`：任务运行日志。
 - `cost_logs`：模型和搜索调用记录。
 
@@ -125,7 +128,7 @@ python3 -m app.cli run-scheduler
 3. 每本书都有 5 个反馈入口。
 4. 点击反馈链接后能选择原因，并写入 `feedback_events.reason_code`。
 5. 可选自由文本能写入 `feedback_events.free_text`。
-6. 再次 `run-daily` 前会处理未回写反馈，并更新 `profile_items`。
+6. 再次 `run-daily` 前会处理未回写反馈，调用 Hermes `reading.feedback.ingest`，写入 `hermes_profile_update_events`，并更新 `profile_items`。
 7. `run-weekly-report` 能发送画像复盘，包含反馈分布、原因分布、画像变化、可能误解和下周建议。
 
 ## 文档

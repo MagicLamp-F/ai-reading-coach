@@ -131,6 +131,21 @@ class ReadingSourceFileDraft:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class HermesProfileUpdateEventDraft:
+    feedback_event_id: int
+    status: str
+    should_update_native_memory: bool
+    native_memory_path: str
+    memory_entry: str
+    rationale: str
+    confidence: float
+    evidence_summary: str
+    error_message: str
+    raw_response: dict[str, Any]
+    route: str = "reading.feedback.ingest"
+
+
 class Repository:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -697,6 +712,32 @@ class Repository:
             "UPDATE feedback_events SET processed_at = CURRENT_TIMESTAMP WHERE id = ?",
             (feedback_id,),
         )
+
+    def record_hermes_profile_update_event(self, draft: HermesProfileUpdateEventDraft) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO hermes_profile_update_events(
+                feedback_event_id, route, status, should_update_native_memory,
+                native_memory_path, memory_entry, rationale, confidence,
+                evidence_summary, error_message, raw_response_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.feedback_event_id,
+                draft.route,
+                draft.status,
+                1 if draft.should_update_native_memory else 0,
+                draft.native_memory_path,
+                draft.memory_entry,
+                draft.rationale,
+                _clamp(draft.confidence),
+                draft.evidence_summary,
+                draft.error_message,
+                json.dumps(draft.raw_response, ensure_ascii=False),
+            ),
+        )
+        return int(cur.lastrowid)
 
     def upsert_profile_item(
         self,

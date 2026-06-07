@@ -11,6 +11,7 @@ from app.memory import (
     TRUNCATION_MARKER,
     build_daily_profile_context,
     build_native_profile_seed_context,
+    hermes_profile_sync_status,
     load_long_term_memory_context,
     upsert_hermes_user_memory_entry,
 )
@@ -230,6 +231,32 @@ class MemoryLoaderTests(unittest.TestCase):
                     "[arc-reading-profile] User reading profile: too long.",
                     char_limit=40,
                 )
+
+    def test_hermes_profile_sync_status_reports_snapshot_and_native_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "HERMES_NATIVE_PROFILE.md"
+            native_user_memory = root / "hermes" / "memories" / "USER.md"
+            snapshot.write_text("# HERMES_NATIVE_PROFILE\n\n## Reading Preferences\n- 经典文学", encoding="utf-8")
+            upsert_hermes_user_memory_entry(native_user_memory, "[arc-reading-profile] User reading profile: 经典文学")
+
+            status = hermes_profile_sync_status(snapshot, native_user_memory, preview_chars=80)
+
+        self.assertTrue(status["snapshot_exists"])
+        self.assertGreater(status["snapshot_chars"], 0)
+        self.assertTrue(status["native_user_memory_exists"])
+        self.assertTrue(status["arc_entry_present"])
+        self.assertIn("经典文学", str(status["arc_entry_preview"]))
+
+    def test_hermes_profile_sync_status_reports_disabled_native_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / "missing.md"
+
+            status = hermes_profile_sync_status(snapshot, None)
+
+        self.assertFalse(status["snapshot_exists"])
+        self.assertFalse(status["native_user_memory_enabled"])
+        self.assertFalse(status["arc_entry_present"])
 
     def test_native_profile_provider_raises_when_generation_fails(self):
         def runner(argv, input, text, capture_output, timeout, check):

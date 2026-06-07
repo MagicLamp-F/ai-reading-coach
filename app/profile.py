@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.profile_ingest import FeedbackProfileIngestor, HermesProfileIngestError
 from app.repository import Repository
+from app.repository import HermesProfileUpdateEventDraft
 
 
 PROFILE_CATEGORIES = {
@@ -50,9 +52,12 @@ def seed_user_manual(repo: Repository, text: str) -> None:
         )
 
 
-def process_feedback(repo: Repository) -> int:
+def process_feedback(repo: Repository, profile_ingestor: FeedbackProfileIngestor | None = None) -> int:
     processed = 0
     for event in repo.unprocessed_feedback():
+        if profile_ingestor is not None:
+            _ingest_feedback_for_native_profile(repo, profile_ingestor, event)
+
         effects = _effects_for_event(event)
         if not effects:
             repo.mark_feedback_processed(int(event["id"]))
@@ -79,6 +84,43 @@ def process_feedback(repo: Repository) -> int:
         repo.mark_feedback_processed(int(event["id"]))
         processed += 1
     return processed
+
+
+def _ingest_feedback_for_native_profile(repo: Repository, profile_ingestor: FeedbackProfileIngestor, event) -> None:
+    feedback_event_id = int(event["id"])
+    try:
+        result = profile_ingestor.ingest_feedback(event)
+    except Exception as exc:
+        repo.record_hermes_profile_update_event(
+            HermesProfileUpdateEventDraft(
+                feedback_event_id=feedback_event_id,
+                status="failed",
+                should_update_native_memory=False,
+                native_memory_path="",
+                memory_entry="",
+                rationale="",
+                confidence=0.0,
+                evidence_summary="",
+                error_message=str(exc),
+                raw_response={},
+            )
+        )
+        raise HermesProfileIngestError(f"Hermes feedback ingest failed for feedback_id={feedback_event_id}: {exc}") from exc
+
+    repo.record_hermes_profile_update_event(
+        HermesProfileUpdateEventDraft(
+            feedback_event_id=feedback_event_id,
+            status=result.status,
+            should_update_native_memory=result.should_update_native_memory,
+            native_memory_path=result.native_memory_path,
+            memory_entry=result.memory_entry,
+            rationale=result.rationale,
+            confidence=result.confidence,
+            evidence_summary=result.evidence_summary,
+            error_message="",
+            raw_response=result.raw_response,
+        )
+    )
 
 
 def build_profile_context(repo: Repository, limit: int = 12) -> str:

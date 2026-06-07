@@ -84,6 +84,23 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(recommendation_id) REFERENCES recommendations(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS hermes_profile_update_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feedback_event_id INTEGER NOT NULL,
+            route TEXT NOT NULL DEFAULT 'reading.feedback.ingest',
+            status TEXT NOT NULL CHECK(status IN ('applied', 'skipped', 'failed')),
+            should_update_native_memory INTEGER NOT NULL DEFAULT 0,
+            native_memory_path TEXT NOT NULL DEFAULT '',
+            memory_entry TEXT NOT NULL DEFAULT '',
+            rationale TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            evidence_summary TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            raw_response_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(feedback_event_id) REFERENCES feedback_events(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS cost_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id INTEGER,
@@ -292,6 +309,8 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_profile_category_weight ON profile_items(category, weight DESC, confidence DESC);
         CREATE INDEX IF NOT EXISTS idx_feedback_unprocessed ON feedback_events(processed_at);
+        CREATE INDEX IF NOT EXISTS idx_hermes_profile_update_feedback ON hermes_profile_update_events(feedback_event_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_hermes_profile_update_status ON hermes_profile_update_events(status, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_recommendations_date ON recommendations(recommendation_date);
         CREATE INDEX IF NOT EXISTS idx_cost_logs_run ON cost_logs(run_id);
         CREATE INDEX IF NOT EXISTS idx_reflections_status_created ON reflections(status, created_at DESC);

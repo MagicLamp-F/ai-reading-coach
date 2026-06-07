@@ -78,7 +78,7 @@ run-daily
        - Hermes profile summary
   -> ARC 调用 Hermes
        - 请求 Hermes 基于原生画像和业务证据生成推荐意图/排序/解释
-       - 允许 Hermes 在专门的 profile-update route 中更新 native memory
+       - 通过专门的 profile-update route 判断是否更新 native memory
   -> ARC 写业务结果
        - recommendations
        - reading_packs
@@ -149,10 +149,12 @@ Do not modify files, databases, memories, messages, network channels, or apply p
 | `reading.recommend.generate` | 否 | 生成候选推荐 |
 | `reading.fast_read_pack` | 否 | 生成阅读包 |
 | `reading.reflection.generate` | 否 | 生成 ARC reflection 草稿 |
-| `reading.feedback.ingest` | 是，受控 | 把明确反馈交给 Hermes 判断是否更新主画像 |
+| `reading.feedback.ingest` | 否，Hermes 只返回决策；ARC 受控写入 | 把明确反馈交给 Hermes 判断是否更新主画像 |
 | `reading.profile.sync_snapshot` | 否 | 从 Hermes 主画像生成 ARC 可读 snapshot |
 
 这样可以保留当前安全边界，同时给主画像更新开一个可审计、可限流、可回滚的专门通道。
+
+2026-06-07 已采用更保守的落地方式：`reading.feedback.ingest` 的 prompt 仍禁止 Hermes 直接改文件或 memory，Hermes 只返回 `profile_update_v1` 决策；ARC 业务编排层校验结果后，只 upsert `/home/ubuntu/.hermes/memories/USER.md` 中带 `[arc-reading-profile]` 标记的单条 entry，并写入 SQLite 审计表。
 
 ## 7. Hermes Native Profile Snapshot 与 Native USER Memory
 
@@ -256,33 +258,34 @@ Hermes 的 built-in memory 是文件型存储，`USER.md` 和 `MEMORY.md` 位于
 
 任务：
 
-- 新增 `reading.feedback.ingest` route。
-- 反馈事件入库后异步调用 Hermes。
-- Hermes 返回 memory delta 和是否写入。
-- ARC 记录 `hermes_profile_update_events` 审计表或等价日志。
+- 新增 `reading.feedback.ingest` route。已完成。
+- `run-daily` 开始时处理未处理反馈，调用 Hermes。已完成。
+- Hermes 返回 `should_update_native_memory`、`memory_entry`、`rationale`、`confidence`、`evidence_summary`。已完成。
+- ARC 记录 `hermes_profile_update_events` 审计表。已完成。
+- `/metrics` 暴露 `reading_coach_hermes_profile_updates_total{status=...}`。已完成。
 
 验收：
 
 - 每条关键反馈都有可追踪的 Hermes ingest 结果。
-- 失败只记 warning，不影响反馈入库。
+- Hermes ingest 失败会记录 `failed` 审计行，并让本次 `run-daily` 失败；不走 fallback，也不把反馈标记 processed。
 - 没有证据的推断不写入 native memory。
 
 ### Phase 3: Hermes 主画像写入
 
-目标：允许 Hermes 在受控 route 中维护 native memory。
+目标：允许 Hermes 判断画像增量，由 ARC 在受控 route 中写入 native memory。
 
 任务：
 
-- 移除 `reading.feedback.ingest` 的 memory 写入禁令。
-- 限制只允许该 route 写 Hermes memory。
-- 增加备份、审计和回滚。
-- 增加每日写入次数限制。
+- 保留 Hermes 直接 memory 写入禁令，避免 route agent 黑箱改文件。已决定。
+- 限制 ARC 只写 `[arc-reading-profile]` 单条 entry。已完成。
+- 增加审计表和 Prometheus status 计数。已完成。
+- 增加备份、回滚和每日写入次数限制。待做。
 
 验收：
 
 - Hermes native memory 出现可解释增量。
 - ARC 审计记录能说明“为什么写入”。
-- 写入失败不破坏 ARC 业务流程。
+- 写入失败直接暴露并中断，不写 fallback 画像。
 
 ### Phase 4: 主从收敛
 
@@ -326,7 +329,12 @@ ARC 已经以 Hermes native profile 为主画像
 
 因此这两个开关是 ARC 画像增强开关，不是主画像对齐方案。
 
-当前已完成的是 snapshot -> Hermes native `USER.md` 的受控同步，不等于反馈事件自动写入长期主画像。反馈驱动的 `reading.feedback.ingest` 仍需要独立审计链路。
+当前已完成的是两条受控路径：
+
+- snapshot -> Hermes native `USER.md` 的 `[arc-reading-profile]` 同步。
+- 反馈事件 -> Hermes `reading.feedback.ingest` 决策 -> `hermes_profile_update_events` 审计 -> 可选 upsert 同一条 native `USER.md` entry。
+
+这仍不表示 Hermes route agent 可以任意写 memory。所有文件写入由 ARC 编排层执行，失败必须暴露。
 
 ## 11. 最终验收标准
 

@@ -1,6 +1,6 @@
 # 技术项目骨架与运行流程
 
-更新时间：2026-06-05
+更新时间：2026-06-07
 
 ## 1. 项目一句话
 
@@ -13,7 +13,7 @@ SQLite 保存事实
 -> 反馈再进入下一轮画像与推荐
 ```
 
-Hermes 是智能生成层，不直接写 ARC SQLite，不直接发飞书。ARC 是业务账本、投递和审计系统。当前 Hermes native profile snapshot 由 Hermes 生成，但输入证据以 ARC SQLite reading profile 和 ARC applied memory 为主，SOUL 只作为低优先级背景。ARC 会把这份阅读画像同步到 Hermes built-in `USER.md`，让 Hermes UI/CLI 的新会话也能看到同一条阅读画像 memory。
+Hermes 是智能生成层，不直接写 ARC SQLite，不直接发飞书。ARC 是业务账本、投递和审计系统。当前 Hermes native profile snapshot 由 Hermes 生成，但输入证据以 ARC SQLite reading profile 和 ARC applied memory 为主，SOUL 只作为低优先级背景。ARC 会把这份阅读画像同步到 Hermes built-in `USER.md`，让 Hermes UI/CLI 的新会话也能看到同一条阅读画像 memory。反馈画像更新采用同一安全边界：Hermes `reading.feedback.ingest` 只返回是否更新主画像的决策，ARC 负责写审计表和受控 upsert native `USER.md`。
 
 ## 2. 核心目录
 
@@ -26,6 +26,7 @@ app/
   repository.py           SQLite 读写封装
   workflow.py             每日推荐、飞书投递、delivery outbox、周报主流程
   daily_agent_adapter.py  Hermes daily 推荐 route 调用
+  profile_ingest.py       Hermes reading.feedback.ingest 调用与受控 USER memory 写入
   reading_pack.py         deep_read_pack 生成、artifact、Markdown、阅读包预览
   reflection.py           反思草稿、审批、应用、memory change log
   reflection_adapter.py   Hermes/custom reflection adapter
@@ -58,6 +59,10 @@ Settings.from_env()
 -> build_context()
 -> ReadingCoachWorkflow.run_daily_recommendations()
    -> process_feedback()
+      -> 对未处理 feedback_events 调用 Hermes reading.feedback.ingest
+      -> 写 hermes_profile_update_events 审计
+      -> 如果 Hermes 明确要求更新，ARC upsert /home/ubuntu/.hermes/memories/USER.md 的 [arc-reading-profile] entry
+      -> 再按 ARC 规则更新 profile_items 并标记 feedback processed
    -> HermesNativeProfileProvider.load_context()
       -> 读 memory/HERMES_NATIVE_PROFILE.md
       -> 缺失或仅含“缺少个人阅读事实”占位时，调用 reading.profile.sync_snapshot
@@ -104,6 +109,26 @@ ARC 只管理其中一条 entry：
 ```
 
 重复运行会替换这条 entry，不会清空 Hermes UI/CLI 里已有的其它 USER memories。Hermes Agent 会在新会话启动时冻结读取 built-in memory，因此 UI 旧会话不会保证实时注入刚写入的画像。
+
+反馈驱动的主画像更新链路：
+
+```text
+feedback_events(processed_at IS NULL)
+-> Hermes route: reading.feedback.ingest
+   output_schema: profile_update_v1
+   output: should_update_native_memory / memory_entry / rationale / confidence / evidence_summary
+-> hermes_profile_update_events
+   status: applied / skipped / failed
+-> optional upsert native USER.md [arc-reading-profile]
+-> ARC profile_items
+-> feedback_events.processed_at
+```
+
+失败边界：
+
+- Hermes feedback ingest 超时、退出非 0、返回非法 JSON 或要求写空 memory entry 时，写 `hermes_profile_update_events.status='failed'`。
+- 失败后本次 `run-daily` 失败，`feedback_events.processed_at` 保持空，不走 fallback。
+- 单次弱信号可以被 Hermes 判定 `skipped`，此时仍保留审计，但不写 native USER memory。
 
 ## 5. Hermes 严格模式
 
@@ -176,6 +201,13 @@ set +a
 python3 -m app.cli run-daily
 ```
 
+查看 Hermes snapshot 与 native USER memory 同步状态：
+
+```bash
+python3 -m app.cli show-hermes-profile-sync
+python3 -m app.cli show-hermes-profile-sync --json
+```
+
 验证 Hermes native USER memory：
 
 ```bash
@@ -196,6 +228,23 @@ from app.db import connect
 s = Settings.from_env()
 conn = connect(s.database_path)
 for row in conn.execute("select * from run_logs order by id desc limit 5"):
+    print(dict(row))
+PY
+```
+
+查 Hermes feedback ingest 审计：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+from app.cli import _load_env_file
+from app.config import Settings
+from app.db import connect, init_db
+_load_env_file(Path('.env'))
+s = Settings.from_env()
+conn = connect(s.database_path)
+init_db(conn)
+for row in conn.execute("select id, feedback_event_id, status, should_update_native_memory, confidence, memory_entry, error_message from hermes_profile_update_events order by id desc limit 5"):
     print(dict(row))
 PY
 ```
@@ -247,7 +296,60 @@ reflection run_id=51 success
 reflection_id=5 applied
 ```
 
-## 9. 文档维护规则
+## 9. 2026-06-07 真实验证结果
+
+正常反馈入口验证：
+
+```text
+python3 -m app.cli run-server --host 127.0.0.1 --port 8123
+POST /feedback/inline
+feedback_events.id=27
+recommendation_id=68
+feedback_type=like
+reason_code=topic_matches
+processed_at=NULL
+```
+
+正常 `run-daily` 验证：
+
+```text
+daily run_id=56 success
+processed_feedback=1
+recommendation_id=69: 围城 / 钱锺书
+reading_pack id=40 status=generated generator_provider=hermes-agent
+reflection run_id=57 success
+reflection_id=8 auto-applied
+```
+
+Hermes feedback ingest 审计：
+
+```text
+hermes_profile_update_events.id=1
+feedback_event_id=27
+status=applied
+should_update_native_memory=1
+confidence=0.91
+memory_entry=[arc-reading-profile] User reading profile: 用户明确反馈科幻经典很符合当前阅读兴趣，尤其可继续推荐带有文明想象、技术伦理与未来社会主题的科幻作品。
+```
+
+Hermes native USER memory 同步状态：
+
+```text
+python3 -m app.cli show-hermes-profile-sync --json
+snapshot_exists=true
+native_user_memory_path=/home/ubuntu/.hermes/memories/USER.md
+native_user_memory_exists=true
+arc_entry_present=true
+arc_entry_chars=596
+```
+
+判断：
+
+- Hermes 已作为主画像决策者处理真实反馈：`reading.feedback.ingest` 生成了明确画像更新决策。
+- ARC 没有让 Hermes 黑箱写文件；写入由 ARC 编排层完成，并有 SQLite 审计。
+- 没有 fallback：如果 Hermes feedback ingest 失败，本次 run 会失败，反馈不会被标记 processed。
+
+## 10. 文档维护规则
 
 每次大改后必须做三件事：
 

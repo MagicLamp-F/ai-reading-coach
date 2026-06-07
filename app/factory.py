@@ -9,6 +9,7 @@ from app.http_client import HttpClient
 from app.lark import LarkRobotClient
 from app.llm import OpenAIChatClient
 from app.memory import HermesNativeProfileProvider
+from app.profile_ingest import HermesFeedbackProfileIngestor
 from app.reflection_adapter import ReflectionAgentAdapter, build_reflection_adapter
 from app.reading_pack import HermesReadingPackAdapter, build_reading_pack_agent
 from app.repository import Repository
@@ -86,6 +87,12 @@ def build_context(settings: Settings) -> AppContext:
         native_user_memory_path=settings.hermes_native_user_memory_path,
         native_user_memory_char_limit=settings.hermes_native_user_memory_char_limit,
     )
+    profile_ingestor = HermesFeedbackProfileIngestor(
+        command=settings.hermes_agent_command,
+        timeout_seconds=settings.hermes_agent_timeout_seconds,
+        native_user_memory_path=settings.hermes_native_user_memory_path,
+        native_user_memory_char_limit=settings.hermes_native_user_memory_char_limit,
+    )
     workflow = ReadingCoachWorkflow(
         repo=repo,
         search=search,
@@ -109,6 +116,7 @@ def build_context(settings: Settings) -> AppContext:
         source_aware_candidate_count=settings.source_aware_candidate_count,
         source_min_coverage_score=settings.source_min_coverage_score,
         source_aware_allow_limited_fill=settings.source_aware_allow_limited_fill,
+        profile_ingestor=profile_ingestor,
     )
     return AppContext(
         settings=settings,
