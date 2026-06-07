@@ -32,7 +32,7 @@ AI Reading Coach 是一个个人版阅读推荐、阅读包生成和反馈画像
 - 当前不是多人 SaaS。
 - 当前不做复杂账号系统。
 - 当前不做商业化推荐排序。
-- 当前不保证 Web 前端/API 已经完全稳定；它们仍处于进行中改动。
+- 当前 Web 前端/API 是个人阅读页和管理入口，不是多人 SaaS 后台。
 - 当前不允许 Hermes route agent 直接改 ARC SQLite、发消息或任意写文件。
 
 ## 3. 用户角色
@@ -235,11 +235,6 @@ python3 -m app.cli send-guided-reading-pushes
 - 管理端上传书源、创建阅读计划。
 - React Web 前端展示阅读体验。
 
-当前状态：
-
-- `app/api/`、`web/`、`docker-compose.yml` 相关改动仍有未提交内容。
-- 该能力应视为进行中，不应和已提交稳定后端能力混淆。
-
 验收：
 
 - `GET /api/healthz` 返回 ok。
@@ -324,8 +319,8 @@ python3 -m unittest discover
 
 ## 7. 待完成和风险
 
-- API/Web/部署相关改动仍未提交，需要单独整理和验证。
-- `.env.example` 仍偏旧，部分 Hermes/source-aware 配置未完整展示。
+- API/Web 当前是个人使用界面，仍缺少完整权限、账号和生产级前端测试。
+- `.env.example` 已补齐当前 Hermes、source-aware、reading pack 和 reflection 关键配置；真实密钥和公网地址仍需本机 `.env` 配置。
 - 多用户身份和反馈去重尚未实现。
 - Web 前端部署、HTTPS、公网域名和飞书应用机器人还未完全产品化。
 - Hermes native USER memory 写入后，已有 Hermes UI 会话可能不会立刻加载；通常需要新会话。

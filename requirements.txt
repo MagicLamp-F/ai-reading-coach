@@ -1,3 +1,4 @@
-# The MVP uses only Python standard library modules.
-# Keep this file for future optional integrations.
-
+fastapi==0.115.12
+httpx==0.28.1
+python-multipart==0.0.20
+uvicorn[standard]==0.34.3

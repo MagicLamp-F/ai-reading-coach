@@ -118,6 +118,10 @@ def main() -> None:
     server.add_argument("--host", default="127.0.0.1", help="Host to bind")
     server.add_argument("--port", type=int, default=8000, help="Port to bind")
 
+    api = subparsers.add_parser("run-api", help="Run the split frontend/backend JSON API")
+    api.add_argument("--host", default="127.0.0.1", help="Host to bind")
+    api.add_argument("--port", type=int, default=8000, help="Port to bind")
+
     poll = subparsers.add_parser("poll-telegram", help="Poll Telegram callback updates")
     poll.add_argument("--once", action="store_true", help="Run one poll iteration and exit")
 
@@ -282,6 +286,14 @@ def main() -> None:
 
     if args.command == "run-server":
         run_feedback_server(settings, host=args.host, port=args.port)
+        return
+
+    if args.command == "run-api":
+        import uvicorn
+
+        from app.api.main import create_app
+
+        uvicorn.run(create_app(settings), host=args.host, port=args.port)
         return
 
     if args.command == "poll-telegram":

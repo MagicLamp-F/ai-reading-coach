@@ -44,7 +44,7 @@ AI Reading Coach 由三层组成：
 |  reflection.py -> reflection draft / approve / apply          |
 |  memory.py     -> ARC memory + Hermes native profile snapshot |
 |  server.py     -> HTML feedback and reading pages             |
-|  app/api/      -> FastAPI JSON API, currently in progress     |
+|  app/api/      -> FastAPI JSON API                            |
 |  repository.py -> SQLite access                              |
 |  db.py         -> schema and migrations                       |
 +------------------------------+-------------------------------+
@@ -295,7 +295,7 @@ Reflection 写的是 ARC memory，不等同于 Hermes native USER memory。Herme
 
 ## 9. API 和 Web 设计状态
 
-当前工作区已有前后端分离改动：
+前后端分离 surface：
 
 ```text
 app/api/main.py
@@ -312,7 +312,7 @@ deploy/
 - Web 前端通过 `/api/guided-reading/days/{id}` 展示分日导读。
 - 管理端 API 支持上传书源、创建阅读计划、查看计划。
 
-注意：这些改动当前仍未提交，属于进行中状态。接手时先看 `git status --short`，确认是否要继续整理、测试和提交。
+生产部署建议用 `run-api` 提供后端 API，用 nginx 服务 `web/dist` 并反代 `/api/`。
 
 ## 10. 关键配置
 
@@ -376,10 +376,10 @@ HERMES_REFLECTION_AUTO_APPLY=true
     传统 HTML 反馈和阅读页。
 
 12. `app/api/main.py`
-    JSON API，当前进行中。
+    JSON API。
 
 13. `web/src/main.tsx`
-    React Web 入口，当前进行中。
+    React Web 入口。
 
 ## 12. 验证策略
 

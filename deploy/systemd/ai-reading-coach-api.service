@@ -1,0 +1,16 @@
+[Unit]
+Description=AI Reading Coach JSON API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/projects/ai-reading-coach
+EnvironmentFile=/home/ubuntu/projects/ai-reading-coach/.env
+ExecStart=/home/ubuntu/projects/ai-reading-coach/.venv/bin/python -m app.cli run-api --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -10,10 +10,20 @@ services:
   feedback-server:
     build: .
     env_file: .env
-    command: ["python", "-m", "app.cli", "run-server", "--host", "0.0.0.0", "--port", "8000"]
-    ports:
-      - "8000:8000"
+    command: ["python", "-m", "app.cli", "run-api", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+    restart: unless-stopped
+
+  web:
+    image: node:24-alpine
+    working_dir: /app/web
+    command: ["sh", "-c", "npm install && ARC_API_PROXY_TARGET=http://feedback-server:8000 npm run dev"]
+    ports:
+      - "8010:8010"
+    volumes:
+      - .:/app
+    depends_on:
+      - feedback-server
     restart: unless-stopped

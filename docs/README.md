@@ -22,7 +22,7 @@ SQLite 事实账本
 - 来源增强：可通过 Tavily 和公开页面采集书源摘录，给推荐和读书包提供来源上下文。
 - 飞书反馈：推荐卡片提供喜欢、一般、不感兴趣、已读、想深入等反馈入口。
 - HTML 反馈/阅读页：`run-server` 提供传统反馈页和阅读包页面。
-- JSON API + React Web：当前工作区已有 `run-api`、`app/api/` 和 `web/` 改动，用于前后端分离阅读体验；这部分仍有未提交改动。
+- JSON API + React Web：`run-api`、`app/api/` 和 `web/` 提供前后端分离阅读体验、导读页和管理入口。
 - Guided Reading：支持从 Markdown/TXT/EPUB 书源创建分日导读计划。
 - Reflection：支持生成、审批、应用 7 天阅读反思，并写入 ARC memory。
 - Metrics：提供基础 Prometheus 文本指标。
@@ -130,7 +130,7 @@ npm run dev
 docker compose up --build -d
 ```
 
-注意：工作区里 Docker/API/Web 相关改动仍有未提交内容，部署前应先确认这些改动是否进入下一次提交。
+Compose 默认启动 API 与 Vite Web 开发服务。生产部署可使用 `deploy/nginx/ai-reading-coach.conf` 指向 `web/dist`。
 
 ## 常用命令
 
@@ -157,14 +157,14 @@ python3 scripts/backup_sqlite.py
 
 ```text
 app/                 Python 后端、CLI、workflow、Hermes adapters、SQLite repository
-app/api/             FastAPI JSON API，当前仍处于未提交改动中
-web/                 React/Vite 前端，当前仍处于未提交改动中
+app/api/             FastAPI JSON API
+web/                 React/Vite 前端
 data/                SQLite 数据库
 memory/              ARC memory 和 Hermes native profile snapshot
 library/             deep read pack / guided reading artifact
 prompts/             用户说明书示例
 scripts/             备份脚本
-deploy/              systemd/nginx 部署文件，当前仍处于未提交改动中
+deploy/              systemd/nginx 部署文件
 docs/                面向接手和使用的项目文档
 docs/engineering/    历史工程设计、验证记录和开发过程文档
 ```
@@ -196,4 +196,4 @@ reading_pack id=40 status=generated generator_provider=hermes-agent
 reflection run_id=57 success
 ```
 
-当前仍有未提交工作区改动，包括 API/Web/部署/runtime memory 等。阅读项目状态时，应以 `git status --short` 区分“已提交能力”和“进行中改动”。
+如果工作区有未提交改动，先用 `git status --short` 区分代码变更和运行时 memory/artifact。
