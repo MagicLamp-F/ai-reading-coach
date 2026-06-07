@@ -1,45 +1,199 @@
-# 文档目录
+# AI Reading Coach
 
-本目录包含两类文档。
+AI Reading Coach 是一个个人阅读推荐与反馈闭环系统。它每天根据用户画像、历史反馈和公开书源生成书籍推荐，通过飞书或 Web 阅读页触达用户，再把用户反馈沉淀为可审计的阅读画像。
 
-## 工程化文档
-
-入口：[engineering/README.md](./engineering/README.md)
-
-当前最新方向：
+当前项目已经从早期 Telegram MVP 演进为：
 
 ```text
-腾讯云国内轻量服务器
-+ 国内模型/API
-+ 飞书作为第一交互入口
-+ SQLite 事实记忆
-+ Python 编排层
-+ Hermes 长期记忆与反思层
-+ OpenClaw 后续 Gateway/Skill 执行层
+SQLite 事实账本
+-> Hermes 生成推荐、读书包、反思和主画像更新决策
+-> ARC 负责写库、归档 artifact、发飞书、收反馈
+-> 下一次 run-daily 处理反馈并更新画像
 ```
 
-工程化文档用于指导项目实施、架构演进和验收，包括：
+## 当前能力
 
-- 为什么做。
-- 做成什么样。
-- 为什么这样设计。
-- 系统怎么闭环。
-- 数据怎么设计。
-- 怎么分阶段实现。
-- 飞书怎么先接入。
-- 服务器基础环境和 Codex 怎么安装配置。
-- 如何运行、观测和验收。
-- Hermes、OpenClaw、飞书、数据库和文件系统如何共同支撑长期阅读画像与阅读历程。
+- 每日推荐：`run-daily` 生成书籍推荐，写入 SQLite，并推送飞书卡片。
+- Hermes 推荐：主题、候选书、深度读书包和 reflection 可走 Hermes route。
+- 严格模式：配置 `hermes-agent` 后，Hermes route 失败会让任务失败，不静默 fallback。
+- Hermes 主画像：优先读取 `memory/HERMES_NATIVE_PROFILE.md`，并同步到 Hermes native `USER.md` 的 `[arc-reading-profile]` entry。
+- 反馈画像 ingest：未处理反馈会进入 Hermes `reading.feedback.ingest`，Hermes 判断是否更新主画像；ARC 写 `hermes_profile_update_events` 审计。
+- 深度读书包：为推荐书生成结构化 deep read pack，并保存到 `reading_packs`、`artifacts` 和 `library/`。
+- 来源增强：可通过 Tavily 和公开页面采集书源摘录，给推荐和读书包提供来源上下文。
+- 飞书反馈：推荐卡片提供喜欢、一般、不感兴趣、已读、想深入等反馈入口。
+- HTML 反馈/阅读页：`run-server` 提供传统反馈页和阅读包页面。
+- JSON API + React Web：当前工作区已有 `run-api`、`app/api/` 和 `web/` 改动，用于前后端分离阅读体验；这部分仍有未提交改动。
+- Guided Reading：支持从 Markdown/TXT/EPUB 书源创建分日导读计划。
+- Reflection：支持生成、审批、应用 7 天阅读反思，并写入 ARC memory。
+- Metrics：提供基础 Prometheus 文本指标。
 
-当前进展：
+## 快速启动
 
-- [当前进展总结](./engineering/10_current_progress_summary.md)
-- [Hermes 记忆 Agent 与阅读中台设计](./engineering/12_hermes_memory_agent_platform.md)
-- [Hermes 基础架构与接入状态](./engineering/13_hermes_foundation_architecture_status.md)
-- [7 天试运行 Runbook](./engineering/09_trial_run_runbook.md)
+### 1. 准备环境
 
-## 探索性文档
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
 
-- [推荐反馈驱动的多维用户建模 MVP](./user_modeling_feedback_mvp.md)
+至少需要配置：
 
-用于记录产品想法、反馈机制和用户建模方向。工程化文档基于这份探索文档整理而来，并结合最新决策更新为“飞书优先”的实施路径。
+```env
+DATABASE_URL=sqlite:///data/reading_coach.db
+FEEDBACK_SECRET=change-me
+PUBLIC_BASE_URL=http://localhost:8000
+```
+
+如果要真实推送飞书，还需要：
+
+```env
+CHANNEL=lark
+LARK_WEBHOOK_URL=...
+LARK_WEBHOOK_SECRET=...
+```
+
+如果要走当前真实 Hermes 流程，建议配置：
+
+```env
+DAILY_RECOMMENDATION_PROVIDER=hermes-agent
+READING_PACK_PROVIDER=hermes-agent
+HERMES_REFLECTION_PROVIDER=hermes-agent
+HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
+HERMES_AGENT_TIMEOUT_SECONDS=180
+HERMES_NATIVE_USER_MEMORY_PATH=/home/ubuntu/.hermes/memories/USER.md
+```
+
+### 2. 初始化数据库
+
+```bash
+python3 -m app.cli init-db
+```
+
+可选：导入初始用户说明书。
+
+```bash
+python3 -m app.cli seed-profile --file prompts/user_manual.example.md
+```
+
+### 3. 跑一次正常日推
+
+```bash
+python3 -m app.cli run-daily
+```
+
+这会按正常流程执行：
+
+```text
+处理未处理反馈
+-> 调用 Hermes feedback ingest
+-> 更新 ARC profile_items
+-> 读取 Hermes native profile snapshot
+-> Hermes 生成主题和推荐
+-> 来源采集与排序
+-> Hermes 生成 deep read pack
+-> 写 SQLite 和 library artifact
+-> 推送飞书或进入 delivery outbox
+-> 如果启用 DAILY_REFLECTION_ENABLED，继续生成 reflection
+```
+
+### 4. 启动反馈/阅读服务
+
+传统 HTML 服务：
+
+```bash
+python3 -m app.cli run-server --host 0.0.0.0 --port 8000
+```
+
+JSON API 服务：
+
+```bash
+python3 -m app.cli run-api --host 0.0.0.0 --port 8000
+```
+
+React Web 前端：
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+默认前端端口是 `8010`。
+
+### 5. Docker Compose
+
+当前 `docker-compose.yml` 包含后端 API 和 Web 服务：
+
+```bash
+docker compose up --build -d
+```
+
+注意：工作区里 Docker/API/Web 相关改动仍有未提交内容，部署前应先确认这些改动是否进入下一次提交。
+
+## 常用命令
+
+```bash
+python3 -m app.cli init-db
+python3 -m app.cli run-daily
+python3 -m app.cli run-server --host 0.0.0.0 --port 8000
+python3 -m app.cli run-api --host 0.0.0.0 --port 8000
+python3 -m app.cli show-hermes-profile-sync --json
+python3 -m app.cli generate-reading-pack --recommendation-id <id>
+python3 -m app.cli run-weekly-report
+python3 -m app.cli generate-reflection --days 7
+python3 -m app.cli list-reflections
+python3 -m app.cli show-reflection --id <id>
+python3 -m app.cli approve-reflection --id <id>
+python3 -m app.cli apply-reflection --id <id>
+python3 -m app.cli create-guided-reading-plan --source-file book.md --title 书名
+python3 -m app.cli send-guided-reading-pushes
+python3 -m app.cli run-scheduler --no-poller
+python3 scripts/backup_sqlite.py
+```
+
+## 关键目录
+
+```text
+app/                 Python 后端、CLI、workflow、Hermes adapters、SQLite repository
+app/api/             FastAPI JSON API，当前仍处于未提交改动中
+web/                 React/Vite 前端，当前仍处于未提交改动中
+data/                SQLite 数据库
+memory/              ARC memory 和 Hermes native profile snapshot
+library/             deep read pack / guided reading artifact
+prompts/             用户说明书示例
+scripts/             备份脚本
+deploy/              systemd/nginx 部署文件，当前仍处于未提交改动中
+docs/                面向接手和使用的项目文档
+docs/engineering/    历史工程设计、验证记录和开发过程文档
+```
+
+## 文档地图
+
+- [软件需求说明](./software_requirements.md)：项目目标、用户角色、功能需求、非功能需求、验收标准。
+- [概要设计](./architecture_overview.md)：系统模块、数据流、核心流程、关键表和失败边界。
+- [工程文档索引](./engineering/README.md)：历史设计、开发记录、运行手册。
+- [当前工程进展](./engineering/10_current_progress_summary.md)：最近一次工程状态总结。
+
+## 当前状态
+
+最近一次已提交的核心能力是 Hermes feedback ingest：
+
+```text
+commit 25bd85e Wire Hermes feedback profile ingest
+```
+
+真实验证结果：
+
+```text
+feedback_events.id=27
+daily run_id=56 success
+processed_feedback=1
+hermes_profile_update_events.id=1 status=applied confidence=0.91
+recommendation_id=69: 围城 / 钱锺书
+reading_pack id=40 status=generated generator_provider=hermes-agent
+reflection run_id=57 success
+```
+
+当前仍有未提交工作区改动，包括 API/Web/部署/runtime memory 等。阅读项目状态时，应以 `git status --short` 区分“已提交能力”和“进行中改动”。
