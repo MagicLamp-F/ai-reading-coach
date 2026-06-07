@@ -12,6 +12,10 @@ class HermesFeedbackProfileIngestorTests(unittest.TestCase):
     def test_ingest_feedback_sends_profile_update_route_and_writes_native_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
             native_memory = Path(tmp) / "USER.md"
+            native_memory.write_text(
+                "[arc-reading-profile] User reading profile: 旧画像：偏好经典文学。",
+                encoding="utf-8",
+            )
             calls = []
 
             def runner(argv, **kwargs):
@@ -44,6 +48,7 @@ class HermesFeedbackProfileIngestorTests(unittest.TestCase):
             self.assertEqual(calls[0]["argv"], ["/bin/hermes-profile"])
             self.assertEqual(calls[0]["payload"]["route"], "reading.feedback.ingest")
             self.assertEqual(calls[0]["payload"]["output_schema"], "profile_update_v1")
+            self.assertIn("旧画像：偏好经典文学", calls[0]["payload"]["context"]["current_native_user_memory_entry"])
             self.assertTrue(calls[0]["payload"]["constraints"]["do_not_modify_memories"])
             self.assertIn(HERMES_NATIVE_USER_MEMORY_MARKER, native_memory.read_text(encoding="utf-8"))
 

@@ -42,6 +42,7 @@ MISUNDERSTANDING_REASON_CODES = {
     "too_theoretical",
     "too_marketing",
 }
+EMPTY_RECOMMENDATION_HISTORY_CONTEXT = "暂无推荐历史。"
 
 FALLBACK_BOOKS = [
     {
@@ -160,7 +161,8 @@ class ReadingCoachWorkflow:
                 structured_profile_context=structured_profile_context,
                 long_term_memory_context=long_term_memory_context,
             )
-            themes = self._generate_themes(profile_context)
+            recommendation_history_context = build_recommendation_history_context(self.repo)
+            themes = self._generate_themes(profile_context, recommendation_history_context)
             if self.daily_recommendation_agent is None and self.llm.api_key:
                 api_calls += 1
                 self.repo.record_cost(run_id, "model", "generate_themes", 1, {"model": self.llm.model})
@@ -187,7 +189,14 @@ class ReadingCoachWorkflow:
                 if self.source_aware_recommendations
                 else self.daily_recommendation_count
             )
-            drafts = self._generate_recommendations(profile_context, themes, search_results, recommendation_limit)
+            drafts = self._generate_recommendations(
+                profile_context,
+                themes,
+                search_results,
+                recommendation_limit,
+                recommendation_history_context,
+            )
+            drafts = self._filter_hard_excluded_drafts(run_id, drafts)
             drafts = self._source_aware_rank_drafts(run_id, drafts)
             if self.daily_recommendation_agent is None and self.llm.api_key:
                 api_calls += 1
@@ -498,20 +507,22 @@ class ReadingCoachWorkflow:
             logger.warning(warning)
             self.repo.record_run_warning(run_id, warning)
 
-    def _generate_themes(self, profile_context: str) -> list[str]:
+    def _generate_themes(self, profile_context: str, recommendation_history_context: str = "") -> list[str]:
         if self.daily_recommendation_agent is not None:
-            return self.daily_recommendation_agent.generate_themes(profile_context)
+            return self.daily_recommendation_agent.generate_themes(profile_context, recommendation_history_context)
         try:
             response = self.llm.complete_json(
                 "你是读书推荐系统的画像决策层。只输出 JSON。",
                 (
-                    "根据用户画像上下文生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
+                    "根据用户画像上下文和推荐历史生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
                     "如果画像显示用户偏好经典名著、文学、科幻或高口碑作品，主题必须明显覆盖这些方向，"
+                    "避免重复最近高频主题，除非推荐历史显示用户明确正反馈。"
                     "不要只生成工程技术、商业或工具书主题。"
-                    "用户画像上下文按 Priority 1-5 分层；必须优先遵循 Hermes native profile snapshot，"
+                    "用户画像上下文按 Priority 1-5 分层；必须优先遵循 Hermes 原生 USER memory，"
                     "再参考明确反馈和 ARC reading profile；不要把单次弱信号写成长期偏好。"
                     '输出格式：{"themes":["主题1","主题2","主题3"]}\n\n'
-                    f"用户画像上下文：\n{profile_context}"
+                    f"用户画像上下文：\n{profile_context}\n\n"
+                    f"推荐历史上下文：\n{recommendation_history_context or EMPTY_RECOMMENDATION_HISTORY_CONTEXT}"
                 ),
             )
         except Exception:
@@ -528,12 +539,14 @@ class ReadingCoachWorkflow:
         themes: list[str],
         search_results: list[SearchResult],
         max_books: int = 3,
+        recommendation_history_context: str = "",
     ) -> list[RecommendationDraft]:
         if self.daily_recommendation_agent is not None:
             books = self.daily_recommendation_agent.generate_recommendations(
                 profile_context,
                 themes,
                 search_results,
+                recommendation_history_context=recommendation_history_context,
                 max_books=max_books,
             )
             drafts = [self._draft_from_dict(item) for item in books[:max_books] if isinstance(item, dict)]
@@ -549,19 +562,21 @@ class ReadingCoachWorkflow:
             response = self.llm.complete_json(
                 "你是读书私教系统的执行层。只输出 JSON，不要输出 Markdown。",
                 (
-                    "用户画像上下文按 Priority 1-5 分层；必须优先遵循 Hermes native profile snapshot，"
+                    "用户画像上下文按 Priority 1-5 分层；必须优先遵循 Hermes 原生 USER memory，"
                     "再参考明确反馈和 ARC reading profile；不要把单次弱信号写成长期偏好。"
-                    f"基于用户画像上下文、今日主题和搜索结果，输出 {max_books} 本候选书。"
+                    f"基于用户画像上下文、推荐历史、今日主题和搜索结果，输出 {max_books} 本候选书。"
                     "优先推荐真正的书，尤其是经典名著、高口碑文学、严肃小说、科幻经典或长期被讨论的作品；"
                     "如果用户提到《一句顶一万句》《三体》这类偏好，应优先选择相近气质或同等口碑的书。"
+                    "必须遵守推荐历史中的 Hard exclusions；避免 History fatigue 中的重复主题。"
                     "不要把云厂商文章、博客文章、课程页或普通技术文章当作书籍来源。"
                     "每本书必须包含 title, author, source_url, slot_type, theme, system_hypothesis, "
                     "profile_dimensions, recommendation_reason, profile_mapping, expected_benefit, risk, reading_suggestion。"
-                    "建议额外包含 user_fit_score 和 candidate_reason。"
+                    "建议额外包含 user_fit_score、candidate_reason 和 history_check。"
                     "system_hypothesis 说明这本书正在测试哪个用户假设；profile_dimensions 是画像维度字符串数组。"
                     "slot_type 只能是 profile_fit 或 exploration。"
                     '输出格式：{"books":[...]}。\n\n'
                     f"用户画像上下文：\n{profile_context}\n\n"
+                    f"推荐历史上下文：\n{recommendation_history_context or EMPTY_RECOMMENDATION_HISTORY_CONTEXT}\n\n"
                     f"今日主题：{json.dumps(themes, ensure_ascii=False)}\n\n"
                     f"搜索结果：\n{search_context}"
                 ),
@@ -683,6 +698,26 @@ class ReadingCoachWorkflow:
             self.repo.record_run_warning(run_id, warning)
         return [item["draft"] for item in selected]
 
+    def _filter_hard_excluded_drafts(self, run_id: int, drafts: list[RecommendationDraft]) -> list[RecommendationDraft]:
+        hard_exclusions = _recommendation_hard_exclusion_keys(self.repo)
+        if not hard_exclusions:
+            return drafts
+        kept = []
+        rejected = []
+        for draft in drafts:
+            key = _book_key(draft.title, draft.author)
+            if key in hard_exclusions:
+                rejected.append(f"{draft.title} / {draft.author}")
+            else:
+                kept.append(draft)
+        if rejected:
+            warning = "hard-excluded recommendation candidates removed: " + "; ".join(rejected[:8])
+            logger.warning(warning)
+            self.repo.record_run_warning(run_id, warning)
+        if drafts and not kept:
+            raise RuntimeError("Hermes daily recommendation generation returned only hard-excluded books")
+        return kept
+
     def _draft_from_dict(self, item: dict[str, Any]) -> RecommendationDraft:
         return RecommendationDraft(
             title=str(item.get("title", "Untitled"))[:200],
@@ -772,6 +807,108 @@ def build_daily_profile_context(
         long_term_memory_context=long_term_memory_context,
         hermes_native_profile_context=hermes_native_profile_context,
     )
+
+
+def build_recommendation_history_context(repo: Repository, days: int = 60, limit: int = 20) -> str:
+    recommendations = repo.recent_recommendations(days=days)[:limit]
+    feedback_rows = repo.reflection_feedback_events(days=days, limit=limit * 2)
+    if not recommendations and not feedback_rows:
+        return EMPTY_RECOMMENDATION_HISTORY_CONTEXT
+
+    feedback_by_recommendation: dict[int, list[Any]] = {}
+    for row in feedback_rows:
+        feedback_by_recommendation.setdefault(int(row["recommendation_id"]), []).append(row)
+
+    hard_exclusions = []
+    negative_signals = []
+    positive_anchors = []
+    recent_lines = []
+    theme_counts: dict[str, int] = {}
+
+    for row in recommendations:
+        recommendation_id = int(row["id"])
+        title = str(row["title"] or "")
+        author = str(row["author"] or "")
+        theme = str(row["theme"] or "")
+        slot_type = str(row["slot_type"] or "")
+        theme_counts[theme] = theme_counts.get(theme, 0) + 1
+        feedback = feedback_by_recommendation.get(recommendation_id, [])
+        feedback_summary = _recommendation_feedback_summary(feedback)
+        recent_lines.append(
+            f"- {title} / {author} | theme={theme} | slot={slot_type} | feedback={feedback_summary or 'none'}"
+        )
+        if any(str(item["feedback_type"]) == "already_read" for item in feedback):
+            hard_exclusions.append(f"- {title} / {author}: user marked already_read")
+        if any(str(item["feedback_type"]) == "not_interested" for item in feedback):
+            negative_signals.append(f"- {title} / {author}: {_recommendation_feedback_summary(feedback)}")
+        if any(str(item["feedback_type"]) in {"like", "go_deeper"} for item in feedback):
+            positive_anchors.append(f"- {title} / {author}: {_recommendation_feedback_summary(feedback)}")
+
+    repeated_themes = [
+        f"- {theme}: recommended {count} times in recent {days} days"
+        for theme, count in sorted(theme_counts.items(), key=lambda item: (-item[1], item[0]))
+        if theme and count >= 2
+    ]
+
+    sections = [
+        "RecommendationHistoryContext:",
+        "",
+        "Hard exclusions:",
+        *(hard_exclusions[:8] or ["- None."]),
+        "",
+        "Negative feedback:",
+        *(negative_signals[:8] or ["- None."]),
+        "",
+        "Positive anchors:",
+        *(positive_anchors[:8] or ["- None."]),
+        "",
+        "History fatigue:",
+        *(repeated_themes[:6] or ["- None."]),
+        "",
+        "Recent recommendations:",
+        *recent_lines[:limit],
+        "",
+        "Hermes selection instruction:",
+        "- Do not recommend hard exclusions.",
+        "- Treat negative feedback as a semantic avoidance signal, not just exact-title exclusion.",
+        "- Use positive anchors to find adjacent books, but avoid repeating the same title or theme too frequently.",
+        "- Include history_check in each candidate when possible.",
+    ]
+    return "\n".join(sections)
+
+
+def _recommendation_hard_exclusion_keys(repo: Repository, feedback_days: int = 365, recent_days: int = 14) -> set[tuple[str, str]]:
+    keys = {
+        _book_key(str(row["title"] or ""), str(row["author"] or ""))
+        for row in repo.reflection_feedback_events(days=feedback_days, limit=500)
+        if str(row["feedback_type"] or "") == "already_read"
+    }
+    keys.update(
+        _book_key(str(row["title"] or ""), str(row["author"] or ""))
+        for row in repo.recent_recommendations(days=recent_days)
+    )
+    return {key for key in keys if key[0]}
+
+
+def _book_key(title: str, author: str) -> tuple[str, str]:
+    return (" ".join(title.lower().split()), " ".join(author.lower().split()))
+
+
+def _recommendation_feedback_summary(feedback_rows: list[Any]) -> str:
+    pieces = []
+    for row in feedback_rows[:4]:
+        feedback_type = str(row["feedback_type"] or "")
+        reason_code = str(row["reason_code"] or "")
+        free_text = str(row["free_text"] or "").strip()
+        label = FEEDBACK_LABELS.get(feedback_type, feedback_type)
+        reason = FEEDBACK_REASON_LABELS.get(reason_code, reason_code)
+        text = f"{label}"
+        if reason:
+            text += f"/{reason}"
+        if free_text:
+            text += f": {free_text[:80]}"
+        pieces.append(text)
+    return "; ".join(pieces)
 
 
 def _dimension_type_label(dimension_type: str) -> str:

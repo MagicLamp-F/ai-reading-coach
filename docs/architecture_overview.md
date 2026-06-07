@@ -42,7 +42,7 @@ AI Reading Coach 由三层组成：
 |  profile_ingest.py -> Hermes feedback ingest + USER upsert    |
 |  reading_pack.py -> deep read pack generation and artifact    |
 |  reflection.py -> reflection draft / approve / apply          |
-|  memory.py     -> ARC memory + local Hermes profile snapshot   |
+|  memory.py     -> Hermes native USER profile + ARC memory      |
 |  server.py     -> HTML feedback and reading pages             |
 |  app/api/      -> FastAPI JSON API                            |
 |  repository.py -> SQLite access                              |
@@ -119,10 +119,10 @@ memory/MEMORY.md
   ARC applied reflection memory。
 
 memory/HERMES_NATIVE_PROFILE.md
-  ARC 仓库内的 Hermes 生成画像快照/cache，不是 Hermes 原生 memory。
+  ARC 仓库内的 Hermes 生成画像快照/cache，不是 Hermes 原生 memory，也不是主画像事实源。
 
 /home/ubuntu/.hermes/memories/USER.md
-  Hermes 原生 USER memory。ARC 只维护 [arc-reading-profile] 这一条 entry。
+  Hermes 原生 USER memory。ARC 只维护 [arc-reading-profile] 这一条 entry；这是 run-daily 的主画像读源。
 
 /home/ubuntu/projects/hermes-agent
   Hermes-agent 代码或安装目录，不是默认 memory 目录。真实 memory 目录由 HERMES_HOME 决定。
@@ -176,34 +176,41 @@ python3 -m app.cli run-daily
    - mark_feedback_processed()
 
 5. 构造画像上下文
-   - Priority 1: ARC 本地 Hermes 画像快照
+   - Priority 1: Hermes 原生 USER memory [arc-reading-profile]
    - Priority 2: explicit ARC feedback
    - Priority 3: ARC inferred reading profile
    - Priority 4: ARC applied reflection memory
    - Priority 5: single-run weak signals
 
-6. Hermes 推荐
+6. 构造推荐历史上下文
+   - Hard exclusions: 已读和明确不应重复推荐的书
+   - Negative feedback: 不感兴趣和原因
+   - Positive anchors: 喜欢/想深入的书和主题
+   - History fatigue: 最近重复过多的主题
+   - Recent recommendations: 最近推荐记录
+
+7. Hermes 推荐
    - reading.recommend.intent 生成主题
    - Tavily/公开页面采集来源
    - reading.recommend.generate 生成候选书
    - source-aware ranking 选书
 
-7. 写推荐结果
+8. 写推荐结果
    - books
    - recommendations
    - recommendation_candidates
 
-8. Hermes 生成 deep read pack
+9. Hermes 生成 deep read pack
    - reading.deep_read_pack
    - reading_packs
    - artifacts
    - reading_pack_sources
 
-9. 触达
+10. 触达
    - 飞书卡片
    - delivery_outbox
 
-10. 可选 reflection
+11. 可选 reflection
    - DAILY_REFLECTION_ENABLED=true 时运行
    - 生成 reflection draft
    - HERMES_REFLECTION_AUTO_APPLY=true 时自动 apply
@@ -217,6 +224,7 @@ User clicks feedback
 -> feedback_events inserted
 -> next run-daily
 -> profile.process_feedback()
+-> read Hermes native USER.md [arc-reading-profile]
 -> HermesFeedbackProfileIngestor.ingest_feedback()
 -> reflect-json route reading.feedback.ingest
 -> profile_update_v1 response
@@ -236,20 +244,23 @@ User clicks feedback
 
 这条链路不 fallback。原因是 fallback 会把主画像错误隐藏起来，后续推荐会继续被污染。
 
-## 6. ARC 本地 Hermes 画像快照读取流程
+## 6. Hermes 原生主画像读取流程
 
-`memory/HERMES_NATIVE_PROFILE.md` 是 ARC 本地 cache。它保存 Hermes 基于 ARC evidence 生成的紧凑画像，供 daily prompt 直接使用；它不是 Hermes UI/CLI 自己读取的原生 memory。
+`/home/ubuntu/.hermes/memories/USER.md` 中的 `[arc-reading-profile]` 是主画像事实源。`memory/HERMES_NATIVE_PROFILE.md` 是 ARC 本地 cache/diagnostic artifact；只有原生 USER entry 缺失时，才作为兼容来源生成并同步 compact entry。
 
 Hermes 原生用户 memory 位于当前 `HERMES_HOME/memories/USER.md`。当前默认路径是 `/home/ubuntu/.hermes/memories/USER.md`。`/home/ubuntu/projects/hermes-agent` 是 Hermes-agent 代码或安装目录，除非显式把 `HERMES_HOME` 配到那里，否则不会成为 memory 目录。
 
 ```text
 HermesNativeProfileProvider.load_context()
--> read memory/HERMES_NATIVE_PROFILE.md
--> if missing/placeholder:
+-> read /home/ubuntu/.hermes/memories/USER.md [arc-reading-profile]
+-> if native entry exists:
+     return native entry as Priority 1 context
+-> else read memory/HERMES_NATIVE_PROFILE.md
+-> if snapshot missing/placeholder:
      call reading.profile.sync_snapshot
      write memory/HERMES_NATIVE_PROFILE.md
      upsert Hermes 原生 USER.md [arc-reading-profile]
--> return local snapshot as Priority 1 context
+-> return Hermes 原生 USER.md entry as Priority 1 context
 ```
 
 诊断命令：
@@ -269,7 +280,28 @@ arc_entry_chars
 arc_entry_preview
 ```
 
-## 7. 阅读包流程
+## 7. RecommendationHistoryContext
+
+推荐历史是事实账本，不写入 Hermes 原生 USER memory。ARC 每次日推从 SQLite 构造短上下文并传给 Hermes：
+
+```text
+build_recommendation_history_context()
+-> recent_recommendations(60 days)
+-> reflection_feedback_events(60 days)
+-> Hard exclusions / Negative feedback / Positive anchors / History fatigue / Recent recommendations
+-> pass to reading.recommend.intent
+-> pass to reading.recommend.generate
+```
+
+Hermes 用这个上下文做语义选书和避让；ARC 仍负责来源质量、重复 title/author 去重、写库和审计。这样可以让 Hermes 更智能地选书，但不让历史事实变成不可审计的隐式长对话状态。
+
+## 8. Hermes 对话/session 边界
+
+当前 ARC 到 Hermes 的 route 是非交互调用：每次显式传入主画像、推荐历史、反馈、来源和输出 schema。这样可复现、可审计，不依赖长对话自然记忆。
+
+短局部链路可以作为后续优化：一次 `run-daily` 内的“生成意图 -> 生成候选 -> 语义筛选”可以在 Hermes 支持可控 session/thread id 后放进同一个临时会话。跨天、跨反馈、跨 reflection 的状态必须落到 Hermes 原生 memory 和 ARC SQLite。
+
+## 9. 阅读包流程
 
 ```text
 recommendation_id
@@ -286,7 +318,7 @@ recommendation_id
 
 当前严格模式下，如果 Hermes reading pack 失败，daily run 失败，不写 fallback reading pack。
 
-## 8. Reflection 流程
+## 10. Reflection 流程
 
 ```text
 generate-reflection / run-daily auto reflection
@@ -300,7 +332,7 @@ generate-reflection / run-daily auto reflection
 
 Reflection 写的是 ARC memory，不等同于 Hermes 原生 USER memory。Hermes 原生 USER memory 的 ARC 管理 entry 由 `memory.py` 和 `profile_ingest.py` 受控更新。
 
-## 9. API 和 Web 设计状态
+## 11. API 和 Web 设计
 
 前后端分离 surface：
 
@@ -321,7 +353,7 @@ deploy/
 
 生产部署建议用 `run-api` 提供后端 API，用 nginx 服务 `web/dist` 并反代 `/api/`。
 
-## 10. 关键配置
+## 12. 关键配置
 
 ```env
 DATABASE_URL=sqlite:///data/reading_coach.db
@@ -345,9 +377,9 @@ DAILY_REFLECTION_ENABLED=true
 HERMES_REFLECTION_AUTO_APPLY=true
 ```
 
-`HERMES_NATIVE_PROFILE_PATH` 是 ARC 本地快照路径。`HERMES_NATIVE_USER_MEMORY_PATH` 是 Hermes 原生 memory 路径，通常等于 `$HERMES_HOME/memories/USER.md`。
+`HERMES_NATIVE_USER_MEMORY_PATH` 是 Hermes 原生主画像路径，通常等于 `$HERMES_HOME/memories/USER.md`。`HERMES_NATIVE_PROFILE_PATH` 是 ARC 本地兼容/诊断快照路径。
 
-## 11. 关键节点清单
+## 13. 关键节点清单
 
 接手项目时优先看这些节点：
 
@@ -367,7 +399,7 @@ HERMES_REFLECTION_AUTO_APPLY=true
    反馈如何交给 Hermes 构造主画像。
 
 6. `app/memory.py`
-   ARC 本地 Hermes 画像快照读取，以及 Hermes 原生 USER memory 同步。
+   Hermes 原生 USER 主画像读取、ARC 兼容快照同步。
 
 7. `app/reading_pack.py`
    深度读书包生成、artifact 和来源链接。
@@ -390,7 +422,7 @@ HERMES_REFLECTION_AUTO_APPLY=true
 13. `web/src/main.tsx`
     React Web 入口。
 
-## 12. 验证策略
+## 14. 验证策略
 
 自动化：
 

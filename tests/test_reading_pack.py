@@ -131,7 +131,7 @@ class ReadingPackTests(unittest.TestCase):
             self.assertEqual(result.preview.source_count, 1)
             self.assertEqual(repo.reading_pack_sources(result.reading_pack_id)[0]["id"], source_id)
             self.assertIn("User profile context", llm.user_prompt)
-            self.assertIn("Priority 1: Hermes native profile snapshot", llm.user_prompt)
+            self.assertIn("Priority 1: Hermes native USER memory reading profile", llm.user_prompt)
             self.assertIn("深读业务系统和经典文本", llm.user_prompt)
             self.assertIn("Book source excerpts", llm.user_prompt)
             self.assertIn("反馈闭环、系统边界和维护机制", llm.user_prompt)

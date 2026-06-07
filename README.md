@@ -1,22 +1,30 @@
-# AI 读书私教系统 MVP
+# AI Reading Coach
 
-这是一个个人版 AI 读书私教 MVP：每天生成 3 本书籍推荐，通过飞书卡片推送和反馈链接收集信号，持续更新 SQLite 用户画像，并支持 7 天画像复盘。
+AI Reading Coach 是一个个人阅读推荐与反馈闭环系统。它每天根据 Hermes 主画像、推荐历史和用户反馈生成书籍推荐，通过飞书、传统 HTML 页面或 React Web 触达用户，再把反馈沉淀为可审计的阅读画像。
 
-当前默认通道是飞书；Telegram 代码仍保留为兼容通道，不再是国内服务器试运行的主入口。
+核心边界：
+
+```text
+Hermes 原生 USER.md [arc-reading-profile] 作为主画像
+-> ARC 从 SQLite 构造 RecommendationHistoryContext
+-> Hermes 生成主题、推荐、读书包和画像更新决策
+-> ARC 负责写库、发飞书、归档 artifact、硬校验和审计
+```
 
 ## 功能
 
-- SQLite 保存画像、书籍、推荐历史、反馈事件、运行日志和调用日志。
+- SQLite 保存画像、书籍、推荐历史、反馈事件、运行日志、读书包和调用日志。
 - 飞书自定义机器人推送推荐卡片，每本书包含系统假设、画像维度、推荐理由、收益、风险和建议读法。
 - 反馈链接支持 `喜欢 / 一般 / 不感兴趣 / 已读 / 想深入`，点击后进入原因选择页。
 - 原因反馈支持 HMAC 签名校验，并可补充最多 500 字自由文本。
-- Tavily 搜索书籍资料；无 Key 或调用失败时自动使用内置降级书单。
-- OpenAI 兼容 Chat Completions 生成主题和推荐；无 Key 或调用失败时自动使用保守默认主题和降级推荐。
 - 每天按 `.env` 的 `DAILY_PUSH_TIME` 推送。
 - 每周日 20:00 推送 7 天画像复盘。
-- 日推会优先读取 ARC 本地 Hermes 画像快照（默认 `memory/HERMES_NATIVE_PROFILE.md`）；缺失或仅含占位信息时，会让 Hermes 基于 ARC 阅读画像和已应用 memory 生成 snapshot，再进入推荐。这个文件不是 Hermes 原生 memory；Hermes 原生用户记忆默认在 `/home/ubuntu/.hermes/memories/USER.md`。
+- 日推会优先读取 Hermes 原生用户画像（默认 `/home/ubuntu/.hermes/memories/USER.md` 中的 `[arc-reading-profile]`）；`memory/HERMES_NATIVE_PROFILE.md` 仅作为 ARC 本地兼容/诊断快照。
+- ARC 会从 SQLite 推荐和反馈历史生成 `RecommendationHistoryContext`，让 Hermes 选书时避开已读、负反馈和主题疲劳。
 - 未处理反馈会在下一次 `run-daily` 开始时交给 Hermes `reading.feedback.ingest` 判断是否更新主画像；ARC 记录 `hermes_profile_update_events` 审计，并只受控写入 Hermes 原生 `USER.md` 的 `[arc-reading-profile]` entry。
 - Hermes provider 默认严格失败：配置 `hermes-agent` 后，如果 Hermes route 无输出或无效 JSON，任务会失败并记录错误，不再静默生成 fallback 内容。
+- 深度读书包会写入 `reading_packs`、`artifacts` 和 `library/`，并可在 Web 前端阅读。
+- React Web 前端提供阅读包、分日导读和管理入口。
 - Hermes reflection 支持可插拔 adapter：默认可用 custom reflection；切换到外部 `hermes-agent` 后走严格模式，失败会记录 failed run，不再静默回退。只有显式配置 `hermes-agent-fallback` 才允许回退到 custom。
 - `/metrics` 暴露基础 Prometheus 指标，默认端口 `9108`。
 - 提供 systemd service/timer 和 SQLite 备份脚本，支持 7 天服务器试运行。
@@ -45,17 +53,47 @@ PUBLIC_BASE_URL=https://your-domain.example
 FEEDBACK_SECRET=change-me
 OPENAI_API_KEY=sk-xxx
 TAVILY_API_KEY=tvly-xxx
-HERMES_REFLECTION_PROVIDER=custom
+DAILY_RECOMMENDATION_PROVIDER=hermes-agent
+READING_PACK_PROVIDER=hermes-agent
+HERMES_REFLECTION_PROVIDER=hermes-agent
 HERMES_NATIVE_PROFILE_PATH=memory/HERMES_NATIVE_PROFILE.md
+HERMES_NATIVE_USER_MEMORY_PATH=/home/ubuntu/.hermes/memories/USER.md
 HERMES_SOUL_PATH=/home/ubuntu/.hermes/SOUL.md
 HERMES_NATIVE_PROFILE_MAX_CHARS=6000
 HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
+HERMES_AGENT_TIMEOUT_SECONDS=180
 ```
 
-启动反馈 HTTP 服务：
+启动传统 HTML 反馈/阅读服务：
 
 ```bash
 python3 -m app.cli run-server --host 0.0.0.0 --port 8000
+```
+
+启动 JSON API：
+
+```bash
+python3 -m app.cli run-api --host 0.0.0.0 --port 8000
+```
+
+启动 React Web 前端：
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+默认前端网页：
+
+```text
+http://localhost:8010/
+```
+
+部署到服务器时通常是：
+
+```text
+http://<server-host>:8010/
 ```
 
 启动常驻调度：
@@ -70,6 +108,15 @@ Docker 方式：
 docker compose up --build -d
 ```
 
+## 服务入口
+
+| 服务 | 默认地址 | 说明 |
+| --- | --- | --- |
+| React Web 前端 | `http://localhost:8010/` | 阅读包、分日导读和管理入口 |
+| Web 代理 API | `http://localhost:8010/api/healthz` | 通过 Vite/nginx 访问后端 |
+| 后端 API | `http://localhost:8000/api/healthz` | FastAPI JSON API |
+| 传统 HTML 服务 | `http://localhost:8000/healthz` | `run-server` 反馈/阅读页 |
+
 ## 常用命令
 
 ```bash
@@ -77,7 +124,9 @@ python3 -m app.cli init-db
 python3 -m app.cli seed-profile --file prompts/user_manual.example.md
 python3 -m app.cli run-daily
 python3 -m app.cli run-server --host 0.0.0.0 --port 8000
+python3 -m app.cli run-api --host 0.0.0.0 --port 8000
 python3 -m app.cli show-hermes-profile-sync --json
+python3 -m app.cli generate-reading-pack --recommendation-id <id>
 python3 -m app.cli run-weekly-report
 python3 -m app.cli generate-reflection --days 7
 python3 -m app.cli list-reflections
@@ -118,6 +167,8 @@ python3 -m app.cli run-scheduler
 - `recommendations`：每日推荐记录。
 - `feedback_events`：飞书反馈链接或 Telegram 按钮反馈，含反馈类型、原因和自由文本。
 - `hermes_profile_update_events`：Hermes feedback ingest 审计，记录画像更新决策、证据摘要、状态和错误。
+- `reading_packs`：深度读书包结构化内容和生成状态。
+- `artifacts`：Markdown/HTML 等生成物元数据。
 - `run_logs`：任务运行日志。
 - `cost_logs`：模型和搜索调用记录。
 
@@ -133,6 +184,8 @@ python3 -m app.cli run-scheduler
 
 ## 文档
 
+- 项目导读：[docs/README.md](docs/README.md)
+- 软件需求说明：[docs/software_requirements.md](docs/software_requirements.md)
+- 概要设计：[docs/architecture_overview.md](docs/architecture_overview.md)
+- Memory Model：[docs/memory_model.md](docs/memory_model.md)
 - 工程文档入口：[docs/engineering/README.md](docs/engineering/README.md)
-- 当前进展总结：[docs/engineering/10_current_progress_summary.md](docs/engineering/10_current_progress_summary.md)
-- 7 天试运行 Runbook：[docs/engineering/09_trial_run_runbook.md](docs/engineering/09_trial_run_runbook.md)

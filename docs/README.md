@@ -16,7 +16,8 @@ SQLite 事实账本
 - 每日推荐：`run-daily` 生成书籍推荐，写入 SQLite，并推送飞书卡片。
 - Hermes 推荐：主题、候选书、深度读书包和 reflection 可走 Hermes route。
 - 严格模式：配置 `hermes-agent` 后，Hermes route 失败会让任务失败，不静默 fallback。
-- Hermes 主画像：Hermes 判断画像更新；ARC 本地缓存 `memory/HERMES_NATIVE_PROFILE.md` 作为推荐 prompt 的画像快照，并同步 compact entry 到 Hermes 原生 `USER.md`。
+- Hermes 主画像：Hermes 原生 `USER.md` 中的 `[arc-reading-profile]` 是主画像读源；ARC 本地 `memory/HERMES_NATIVE_PROFILE.md` 仅作为兼容/诊断快照。
+- 推荐历史上下文：ARC 从 SQLite 推荐和反馈历史生成 `RecommendationHistoryContext`，交给 Hermes 做语义选书和避让。
 - 反馈画像 ingest：未处理反馈会进入 Hermes `reading.feedback.ingest`，Hermes 判断是否更新主画像；ARC 写 `hermes_profile_update_events` 审计。
 - 深度读书包：为推荐书生成结构化 deep read pack，并保存到 `reading_packs`、`artifacts` 和 `library/`。
 - 来源增强：可通过 Tavily 和公开页面采集书源摘录，给推荐和读书包提供来源上下文。
@@ -91,7 +92,8 @@ python3 -m app.cli run-daily
 处理未处理反馈
 -> 调用 Hermes feedback ingest
 -> 更新 ARC profile_items
--> 读取 ARC 本地 Hermes 画像快照
+-> 读取 Hermes 原生 USER memory 主画像
+-> 构造 RecommendationHistoryContext
 -> Hermes 生成主题和推荐
 -> 来源采集与排序
 -> Hermes 生成 deep read pack

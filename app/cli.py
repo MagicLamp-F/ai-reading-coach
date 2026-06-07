@@ -183,6 +183,7 @@ def main() -> None:
             memory_dir=context.workflow.memory_dir,
             library_dir=Path(args.library_dir),
             max_memory_chars=context.workflow.max_memory_chars,
+            hermes_native_profile_provider=context.workflow.hermes_native_profile_provider,
             agent=context.reading_pack_agent,
             source_collector=context.source_collector,
         )

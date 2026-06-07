@@ -4,9 +4,10 @@ from pathlib import Path
 
 from app.db import connect, init_db
 from app.memory import HermesNativeProfileProvider
-from app.repository import BookSourceDraft, Repository
+from app.repository import BookSourceDraft, RecommendationDraft, Repository
 from app.workflow import FALLBACK_BOOKS
 from app.workflow import ReadingCoachWorkflow
+from app.workflow import build_recommendation_history_context
 
 
 class FailingLLM:
@@ -587,7 +588,7 @@ class WorkflowTests(unittest.TestCase):
 
             self.assertEqual(len(llm.prompts), 2)
             for _, user_prompt in llm.prompts:
-                self.assertIn("Priority 1: Hermes native profile snapshot", user_prompt)
+                self.assertIn("Priority 1: Hermes native USER memory reading profile", user_prompt)
                 self.assertIn("Priority 3: ARC inferred reading profile", user_prompt)
                 self.assertIn("Priority 4: ARC applied reflection memory", user_prompt)
                 self.assertLess(user_prompt.index("Reading Preferences"), user_prompt.index("偏好工程实践"))
@@ -627,8 +628,120 @@ class WorkflowTests(unittest.TestCase):
 
             run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
             self.assertEqual(run["status"], "success")
-            self.assertIn("暂无 Hermes native profile snapshot", llm.prompts[0][1])
+            self.assertIn("暂无 Hermes native USER memory reading profile", llm.prompts[0][1])
             self.assertIn("暂无 Hermes long-term memory", llm.prompts[0][1])
+            conn.close()
+
+    def test_daily_run_includes_recommendation_history_context_in_prompts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            run_id = repo.create_run("seed")
+            rec_id = repo.add_recommendation(
+                run_id,
+                RecommendationDraft(
+                    title="三体",
+                    author="刘慈欣",
+                    source_url="",
+                    slot_type="profile_fit",
+                    theme="科幻经典",
+                    recommendation_reason="r",
+                    profile_mapping="m",
+                    system_hypothesis="h",
+                    profile_dimensions=["science_fiction"],
+                    expected_benefit="b",
+                    risk="risk",
+                    reading_suggestion="s",
+                    metadata={},
+                ),
+                __import__("datetime").date.today(),
+            )
+            repo.add_feedback(rec_id, "already_read", reason_code="already_finished")
+            llm = PromptCapturingLLM()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=llm,
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                memory_dir=tmp_path / "memory",
+                hermes_native_profile_provider=HermesNativeProfileProvider(
+                    snapshot_path=tmp_path / "missing-native.md",
+                    fallback_soul_path=tmp_path / "missing-soul.md",
+                ),
+            )
+
+            workflow.run_daily_recommendations()
+            history_context = build_recommendation_history_context(repo)
+
+            self.assertIn("Hard exclusions", history_context)
+            self.assertIn("三体 / 刘慈欣: user marked already_read", history_context)
+            for _, user_prompt in llm.prompts:
+                self.assertIn("推荐历史上下文", user_prompt)
+                self.assertIn("三体 / 刘慈欣: user marked already_read", user_prompt)
+            conn.close()
+
+    def test_daily_run_fails_when_all_candidates_are_hard_excluded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            seed_run_id = repo.create_run("seed")
+            rec_id = repo.add_recommendation(
+                seed_run_id,
+                RecommendationDraft(
+                    title="Memory Book 1",
+                    author="Hermes",
+                    source_url="",
+                    slot_type="profile_fit",
+                    theme="长期记忆主题",
+                    recommendation_reason="r",
+                    profile_mapping="m",
+                    system_hypothesis="h",
+                    profile_dimensions=["long_term_memory"],
+                    expected_benefit="b",
+                    risk="risk",
+                    reading_suggestion="s",
+                    metadata={},
+                ),
+                __import__("datetime").date.today(),
+            )
+            repo.add_feedback(rec_id, "already_read", reason_code="already_finished")
+            llm = PromptCapturingLLM()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=llm,
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                daily_recommendation_count=1,
+                memory_dir=tmp_path / "memory",
+                hermes_native_profile_provider=HermesNativeProfileProvider(
+                    snapshot_path=tmp_path / "missing-native.md",
+                    fallback_soul_path=tmp_path / "missing-soul.md",
+                ),
+            )
+
+            with self.assertRaises(RuntimeError):
+                workflow.run_daily_recommendations()
+
+            run = conn.execute("SELECT * FROM run_logs ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual(run["status"], "failed")
+            self.assertIn("hard-excluded", run["error_message"])
+            self.assertIn("hard-excluded recommendation candidates removed", run["warning_message"])
             conn.close()
 
 

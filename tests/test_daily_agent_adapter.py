@@ -18,11 +18,12 @@ class DailyAgentAdapterTests(unittest.TestCase):
 
         adapter = HermesDailyRecommendationAdapter("/tmp/hermes-route", timeout_seconds=12, runner=runner)
 
-        themes = adapter.generate_themes("profile")
+        themes = adapter.generate_themes("profile", "history")
 
         self.assertEqual(themes, ["A", "B", "C"])
         self.assertEqual(calls[0]["route"], "reading.recommend.intent")
         self.assertEqual(calls[0]["output_schema"], "themes_v1")
+        self.assertEqual(calls[0]["context"]["recommendation_history_context"], "history")
         self.assertTrue(calls[0]["constraints"]["do_not_send_messages"])
 
     def test_hermes_adapter_generates_recommendations_with_route_payload(self):
@@ -59,11 +60,12 @@ class DailyAgentAdapterTests(unittest.TestCase):
 
         adapter = HermesDailyRecommendationAdapter("/tmp/hermes-route", timeout_seconds=12, runner=runner)
 
-        books = adapter.generate_recommendations("profile", ["AI"], [])
+        books = adapter.generate_recommendations("profile", ["AI"], [], recommendation_history_context="history")
 
         self.assertEqual(books[0]["title"], "Hermes Book")
         self.assertEqual(calls[0]["route"], "reading.recommend.generate")
         self.assertEqual(calls[0]["output_schema"], "recommendations_v1")
+        self.assertEqual(calls[0]["context"]["recommendation_history_context"], "history")
 
 
 if __name__ == "__main__":

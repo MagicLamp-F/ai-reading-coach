@@ -144,17 +144,25 @@ DAILY_RECOMMENDATION_PROVIDER=hermes-agent
 - 已新增 source-aware candidate ranking：候选书写入 `recommendation_candidates`，最终推荐前先检查来源质量。
 - 2026-06-05 后正常 Hermes provider 为严格模式：Hermes daily route 返回空 stdout、无效 JSON 或无可用书籍时，`run-daily` 标记失败，不再写 fallback 推荐。
 
-### Hermes Native Profile Snapshot
+### Hermes Native USER Primary Profile
 
-- 新增 `memory/HERMES_NATIVE_PROFILE.md` 作为 ARC 只读 native profile snapshot。
+- Hermes 原生 `/home/ubuntu/.hermes/memories/USER.md` 中的 `[arc-reading-profile]` 是当前主画像读源。
+- `memory/HERMES_NATIVE_PROFILE.md` 现在只作为 ARC 兼容/诊断快照；原生 USER entry 缺失时才用它生成并同步 compact entry。
 - 新增 `HermesNativeProfileProvider`：
-  - 优先读取 snapshot。
+  - 优先读取 Hermes 原生 USER memory。
   - snapshot 缺失时调用 Hermes `reading.profile.sync_snapshot` 生成。
   - 生成失败时让 daily run 失败，不再把 SOUL 原文冒充用户画像。
   - 将 snapshot 或 Hermes 返回的 compact entry 同步到 `/home/ubuntu/.hermes/memories/USER.md`。
 - native USER memory 同步使用 `[arc-reading-profile]` 标记 upsert，只替换这一条 entry，不覆盖 Hermes 其它 USER memories。
-- `/metrics` 暴露 `reading_coach_hermes_native_profile_loads_total`，按 `snapshot`、`generated_snapshot`、`soul_fallback`、`missing` 统计。
+- `/metrics` 暴露 `reading_coach_hermes_native_profile_loads_total`，按 `native_user_memory`、`compat_snapshot`、`generated_native_user_memory`、`soul_fallback`、`missing` 统计。
 - 2026-06-05 真实测试确认：当前 `/home/ubuntu/.hermes/SOUL.md` 是 Hermes Agent 身份说明，不是用户画像；后续已改为把 ARC evidence 传给 Hermes 生成 snapshot，并刷新出包含经典名著/高口碑文学/科幻、个人知识管理、软件工程实践和 AI Agent 商业化降频判断的可用画像。
+
+### RecommendationHistoryContext
+
+- ARC 从 SQLite `recommendations` 和 `feedback_events` 生成 `RecommendationHistoryContext`。
+- 该上下文包含 hard exclusions、negative feedback、positive anchors、history fatigue 和 recent recommendations。
+- Hermes daily routes `reading.recommend.intent` 和 `reading.recommend.generate` 都会收到该上下文，用于语义选书和避让。
+- 推荐历史不写入 Hermes 原生 USER memory；它是 ARC 事实账本的一部分。
 
 ### Hermes Feedback Ingest
 

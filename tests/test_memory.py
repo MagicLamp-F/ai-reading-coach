@@ -35,7 +35,32 @@ class MemoryLoaderTests(unittest.TestCase):
         self.assertLessEqual(len(context), 80)
         self.assertIn(TRUNCATION_MARKER, context)
 
-    def test_native_profile_provider_reads_arc_snapshot_first(self):
+    def test_native_profile_provider_reads_native_user_memory_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "HERMES_NATIVE_PROFILE.md"
+            soul = root / "SOUL.md"
+            native_user_memory = root / "hermes" / "memories" / "USER.md"
+            snapshot.write_text("Reading Preferences: literary classics", encoding="utf-8")
+            soul.write_text("SOUL fallback should not appear", encoding="utf-8")
+            upsert_hermes_user_memory_entry(
+                native_user_memory,
+                "[arc-reading-profile] User reading profile: native classics preference.",
+            )
+            provider = HermesNativeProfileProvider(
+                snapshot_path=snapshot,
+                fallback_soul_path=soul,
+                native_user_memory_path=native_user_memory,
+            )
+
+            context = provider.load_context()
+
+        self.assertIn("Hermes native USER.md", context)
+        self.assertIn("native classics preference", context)
+        self.assertNotIn("literary classics", context)
+        self.assertNotIn("SOUL fallback", context)
+
+    def test_native_profile_provider_uses_arc_snapshot_as_compatibility_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             snapshot = root / "HERMES_NATIVE_PROFILE.md"
@@ -46,7 +71,7 @@ class MemoryLoaderTests(unittest.TestCase):
 
             context = provider.load_context()
 
-        self.assertIn("HERMES_NATIVE_PROFILE.md", context)
+        self.assertIn("ARC compatibility snapshot HERMES_NATIVE_PROFILE.md", context)
         self.assertIn("literary classics", context)
         self.assertNotIn("SOUL fallback", context)
 

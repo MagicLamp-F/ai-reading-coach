@@ -18,7 +18,7 @@ class DailyAgentAdapterError(RuntimeError):
 class DailyRecommendationAgentAdapter(Protocol):
     name: str
 
-    def generate_themes(self, profile_context: str) -> list[str]:
+    def generate_themes(self, profile_context: str, recommendation_history_context: str = "") -> list[str]:
         ...
 
     def generate_recommendations(
@@ -27,6 +27,7 @@ class DailyRecommendationAgentAdapter(Protocol):
         themes: list[str],
         search_results: list[SearchResult],
         max_books: int = 3,
+        recommendation_history_context: str = "",
     ) -> list[dict[str, Any]]:
         ...
 
@@ -44,7 +45,7 @@ class HermesDailyRecommendationAdapter:
         self.timeout_seconds = timeout_seconds
         self.runner = runner
 
-    def generate_themes(self, profile_context: str) -> list[str]:
+    def generate_themes(self, profile_context: str, recommendation_history_context: str = "") -> list[str]:
         response = self._call(
             {
                 "route": "reading.recommend.intent",
@@ -54,12 +55,16 @@ class HermesDailyRecommendationAdapter:
                 "format": "json",
                 "system_prompt": "你是读书推荐系统的 Hermes 画像决策层。只输出 JSON。",
                 "user_prompt": (
-                    "根据用户画像上下文生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
+                    "根据用户画像上下文和推荐历史生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
                     "如果画像显示用户偏好经典名著、文学、科幻或高口碑作品，主题必须明显覆盖这些方向，"
+                    "避免重复最近高频主题，除非推荐历史显示用户明确正反馈。"
                     "不要只生成工程技术、商业或工具书主题。"
                     '输出格式严格为 {"themes":["主题1","主题2","主题3"]}。'
                 ),
-                "context": {"profile_context": profile_context},
+                "context": {
+                    "profile_context": profile_context,
+                    "recommendation_history_context": recommendation_history_context,
+                },
                 "output_contract": {"themes": ["string"]},
                 "constraints": _constraints(),
             }
@@ -75,6 +80,7 @@ class HermesDailyRecommendationAdapter:
         themes: list[str],
         search_results: list[SearchResult],
         max_books: int = 3,
+        recommendation_history_context: str = "",
     ) -> list[dict[str, Any]]:
         search_context = "\n".join(
             f"- {result.title}\n  {result.url}\n  {result.content[:300]}"
@@ -89,18 +95,20 @@ class HermesDailyRecommendationAdapter:
                 "format": "json",
                 "system_prompt": "你是读书私教系统的 Hermes 推荐筛选层。只输出 JSON，不要输出 Markdown。",
                 "user_prompt": (
-                    f"基于用户画像上下文、今日主题和搜索结果，筛选并输出 {max_books} 本候选书。"
+                    f"基于用户画像上下文、推荐历史、今日主题和搜索结果，筛选并输出 {max_books} 本候选书。"
                     "优先推荐真正的书，尤其是经典名著、高口碑文学、严肃小说、科幻经典或长期被讨论的作品；"
                     "如果用户提到《一句顶一万句》《三体》这类偏好，应优先选择相近气质或同等口碑的书。"
+                    "必须遵守推荐历史中的 Hard exclusions；避免 History fatigue 中的重复主题。"
                     "不要把云厂商文章、博客文章、课程页或普通技术文章当作书籍来源。"
                     "每本书必须包含 title, author, source_url, slot_type, theme, system_hypothesis, "
                     "profile_dimensions, recommendation_reason, profile_mapping, expected_benefit, risk, reading_suggestion。"
-                    "建议额外包含 user_fit_score 和 candidate_reason。"
+                    "建议额外包含 user_fit_score、candidate_reason 和 history_check。"
                     "slot_type 只能是 profile_fit 或 exploration。"
                     '输出格式严格为 {"books":[...]}。'
                 ),
                 "context": {
                     "profile_context": profile_context,
+                    "recommendation_history_context": recommendation_history_context,
                     "themes": themes,
                     "search_results": search_context,
                 },

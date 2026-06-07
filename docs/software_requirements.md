@@ -76,8 +76,8 @@ python3 -m app.cli seed-profile --file prompts/user_manual.example.md
 
 系统应支持：
 
-- 读取用户画像、历史反馈、近期推荐和 long-term memory。
-- 优先读取 ARC 本地 Hermes 画像快照。
+- 读取 Hermes 原生 USER memory 主画像、历史反馈、近期推荐和 long-term memory。
+- 从 SQLite 推荐/反馈历史生成 `RecommendationHistoryContext`，供 Hermes 选书时避开已读、负反馈和主题疲劳。
 - 调用 Hermes 生成推荐主题和候选书。
 - 搜索/采集公开书源。
 - 基于来源质量筛选候选。
@@ -149,7 +149,7 @@ POST /api/reading-packs/{reading_pack_id}/feedback
 系统应支持：
 
 - `run-daily` 开始时处理未处理反馈。
-- 将反馈事件和推荐上下文发送给 Hermes `reading.feedback.ingest`。
+- 将当前 Hermes 原生 `[arc-reading-profile]`、反馈事件和推荐上下文发送给 Hermes `reading.feedback.ingest`。
 - Hermes 返回是否更新 Hermes 原生 USER memory。
 - ARC 写入 `hermes_profile_update_events` 审计。
 - Hermes 明确要求更新时，ARC 受控 upsert Hermes 原生 `USER.md` 中 `[arc-reading-profile]` entry。
@@ -163,12 +163,12 @@ POST /api/reading-packs/{reading_pack_id}/feedback
 - 失败时审计 `status='failed'`，反馈保持未处理，`run-daily` 失败。
 - 不允许 fallback。
 
-### F6. ARC 本地 Hermes 画像快照和 Hermes 原生 memory 同步
+### F6. Hermes 原生 memory 主画像和 ARC 兼容快照
 
 系统应支持：
 
-- 读取 `memory/HERMES_NATIVE_PROFILE.md` 作为最高优先级画像上下文。
-- 明确该文件是 ARC 仓库内的 Hermes 生成画像快照/cache，不是 Hermes 原生 memory。
+- 读取 Hermes 原生 `/home/ubuntu/.hermes/memories/USER.md` 中的 `[arc-reading-profile]` 作为最高优先级画像上下文。
+- 明确 `memory/HERMES_NATIVE_PROFILE.md` 是 ARC 仓库内的 Hermes 生成画像快照/cache，不是 Hermes 原生 memory，也不是主画像事实源。
 - 文件缺失或占位时，调用 Hermes `reading.profile.sync_snapshot` 生成。
 - 同步 compact entry 到 Hermes 原生 `/home/ubuntu/.hermes/memories/USER.md`。
 - 明确 Hermes-agent 项目目录只是代码/安装目录；真实原生 memory 目录由 `HERMES_HOME` 决定。
@@ -183,6 +183,23 @@ python3 -m app.cli show-hermes-profile-sync --json
 验收：
 
 - 输出 ARC 本地 snapshot 是否存在、Hermes 原生 USER memory 路径、是否存在 `[arc-reading-profile]` entry。
+
+### F6.1. RecommendationHistoryContext
+
+系统应支持：
+
+- 从 SQLite `recommendations` 和 `feedback_events` 生成推荐历史上下文。
+- 包含 hard exclusions、negative feedback、positive anchors、history fatigue 和 recent recommendations。
+- 将该上下文传给 Hermes `reading.recommend.intent` 和 `reading.recommend.generate`。
+- Hermes 应基于上下文做语义选书和避让；ARC 保留最终写库、审计和硬校验责任。
+
+验收：
+
+- 已读书籍进入 hard exclusions。
+- 不感兴趣反馈进入 negative feedback。
+- 喜欢/想深入反馈进入 positive anchors。
+- 重复主题进入 history fatigue。
+- daily prompt 和 Hermes route payload 中包含 `RecommendationHistoryContext`。
 
 ### F7. Reflection
 

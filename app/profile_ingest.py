@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.memory import upsert_hermes_user_memory_entry
+from app.memory import read_hermes_user_memory_entry, upsert_hermes_user_memory_entry
 
 
 class HermesProfileIngestError(RuntimeError):
@@ -104,6 +104,7 @@ class HermesFeedbackProfileIngestor:
 
     def _build_payload(self, event: Any) -> dict[str, Any]:
         context = {
+            "current_native_user_memory_entry": read_hermes_user_memory_entry(self.native_user_memory_path),
             "feedback_event": {
                 "id": int(event["id"]),
                 "recommendation_id": int(event["recommendation_id"]),
@@ -129,6 +130,7 @@ class HermesFeedbackProfileIngestor:
             "system_prompt": "Return exactly one JSON object for a controlled Hermes native USER memory update decision.",
             "user_prompt": (
                 "Decide whether this ARC reading feedback should update Hermes native USER memory. "
+                "Use current_native_user_memory_entry as the existing long-term reading profile; preserve stable facts unless the new feedback clearly corrects them. "
                 "Only update for explicit self-report, repeated/high-signal preference, or a clear correction. "
                 "Do not turn one weak click into a long-term identity claim. "
                 "If updating, output one compact declarative memory entry prefixed with "

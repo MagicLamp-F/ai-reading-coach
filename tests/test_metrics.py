@@ -22,7 +22,7 @@ class MetricsTests(unittest.TestCase):
             metrics = _render_metrics(repo)
 
         self.assertIn("reading_coach_hermes_native_profile_loads_total", metrics)
-        self.assertIn('source="snapshot"', metrics)
+        self.assertIn('source="compat_snapshot"', metrics)
 
     def test_metrics_include_hermes_profile_update_status_counts(self):
         with tempfile.TemporaryDirectory() as tmp:

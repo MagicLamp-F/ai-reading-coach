@@ -19,10 +19,16 @@ HERMES_MEMORY_ENTRY_DELIMITER = "\n§\n"
 HERMES_NATIVE_USER_MEMORY_MARKER = "[arc-reading-profile]"
 TRUNCATION_MARKER = "\n...[truncated]"
 EMPTY_LONG_TERM_MEMORY_CONTEXT = "暂无 Hermes long-term memory。"
-EMPTY_HERMES_NATIVE_PROFILE_CONTEXT = "暂无 Hermes native profile snapshot。"
+EMPTY_HERMES_NATIVE_PROFILE_CONTEXT = "暂无 Hermes native USER memory reading profile。"
 DEFAULT_HERMES_NATIVE_PROFILE_PATH = Path("memory/HERMES_NATIVE_PROFILE.md")
 DEFAULT_HERMES_SOUL_PATH = Path("/home/ubuntu/.hermes/SOUL.md")
-_NATIVE_PROFILE_LOAD_COUNTS = {"snapshot": 0, "generated_snapshot": 0, "soul_fallback": 0, "missing": 0}
+_NATIVE_PROFILE_LOAD_COUNTS = {
+    "native_user_memory": 0,
+    "compat_snapshot": 0,
+    "generated_native_user_memory": 0,
+    "soul_fallback": 0,
+    "missing": 0,
+}
 _NATIVE_PROFILE_LOAD_COUNTS_LOCK = Lock()
 INSUFFICIENT_PROFILE_MARKERS = (
     "Not enough personal reading facts",
@@ -54,6 +60,11 @@ class HermesNativeProfileProvider:
         self.runner = runner
 
     def load_context(self, seed_context: str = "") -> str:
+        native_entry = read_hermes_user_memory_entry(self.native_user_memory_path)
+        if native_entry:
+            _record_native_profile_load("native_user_memory")
+            return _truncate(f"Hermes native USER.md [arc-reading-profile]:\n{native_entry}", self.max_chars)
+
         snapshot = _read_memory_file(self.snapshot_path, self.max_chars + 1)
         if snapshot:
             if self.generator_command and seed_context.strip() and _is_insufficient_native_profile(snapshot):
@@ -63,12 +74,18 @@ class HermesNativeProfileProvider:
                 )
                 self.snapshot_path.write_text(generated.rstrip() + "\n", encoding="utf-8")
                 self._sync_native_user_memory(generated, user_memory_entry)
-                _record_native_profile_load("generated_snapshot")
+                _record_native_profile_load("generated_native_user_memory")
                 logger.info("Hermes native profile snapshot refreshed from ARC evidence: snapshot_path=%s", self.snapshot_path)
-                return _truncate(f"{self.snapshot_path.name}:\n{generated}", self.max_chars)
+                synced_entry = read_hermes_user_memory_entry(self.native_user_memory_path)
+                if synced_entry:
+                    return _truncate(f"Hermes native USER.md [arc-reading-profile]:\n{synced_entry}", self.max_chars)
+                return _truncate(f"ARC compatibility snapshot {self.snapshot_path.name}:\n{generated}", self.max_chars)
             self._sync_native_user_memory(snapshot)
-            _record_native_profile_load("snapshot")
-            return _truncate(f"{self.snapshot_path.name}:\n{snapshot}", self.max_chars)
+            _record_native_profile_load("compat_snapshot")
+            synced_entry = read_hermes_user_memory_entry(self.native_user_memory_path)
+            if synced_entry:
+                return _truncate(f"Hermes native USER.md [arc-reading-profile]:\n{synced_entry}", self.max_chars)
+            return _truncate(f"ARC compatibility snapshot {self.snapshot_path.name}:\n{snapshot}", self.max_chars)
 
         soul = _read_memory_file(self.fallback_soul_path, self.max_chars + 1)
         if soul:
@@ -77,13 +94,16 @@ class HermesNativeProfileProvider:
                 self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
                 self.snapshot_path.write_text(generated.rstrip() + "\n", encoding="utf-8")
                 self._sync_native_user_memory(generated, user_memory_entry)
-                _record_native_profile_load("generated_snapshot")
+                _record_native_profile_load("generated_native_user_memory")
                 logger.info(
                     "Hermes native profile snapshot generated: snapshot_path=%s fallback_path=%s",
                     self.snapshot_path,
                     self.fallback_soul_path,
                 )
-                return _truncate(f"{self.snapshot_path.name}:\n{generated}", self.max_chars)
+                synced_entry = read_hermes_user_memory_entry(self.native_user_memory_path)
+                if synced_entry:
+                    return _truncate(f"Hermes native USER.md [arc-reading-profile]:\n{synced_entry}", self.max_chars)
+                return _truncate(f"ARC compatibility snapshot {self.snapshot_path.name}:\n{generated}", self.max_chars)
             _record_native_profile_load("soul_fallback")
             logger.info(
                 "Hermes native profile snapshot missing; using SOUL fallback: snapshot_path=%s fallback_path=%s",
@@ -194,7 +214,7 @@ def build_daily_profile_context(
     hermes_native_profile_context: str = EMPTY_HERMES_NATIVE_PROFILE_CONTEXT,
 ) -> str:
     return (
-        "Priority 1: Hermes native profile snapshot:\n"
+        "Priority 1: Hermes native USER memory reading profile:\n"
         f"{hermes_native_profile_context.strip() or EMPTY_HERMES_NATIVE_PROFILE_CONTEXT}\n\n"
         "Priority 2: User explicit ARC feedback:\n"
         "已处理的明确反馈会作为 evidence 进入 ARC structured reading profile；"
@@ -259,6 +279,13 @@ def hermes_profile_sync_status(
         }
     )
     return status
+
+
+def read_hermes_user_memory_entry(native_user_memory_path: Path | None) -> str:
+    if native_user_memory_path is None:
+        return ""
+    entries = _read_hermes_memory_entries(native_user_memory_path)
+    return next((entry for entry in entries if HERMES_NATIVE_USER_MEMORY_MARKER in entry), "")
 
 
 def _read_memory_file(path: Path, read_limit: int) -> str:

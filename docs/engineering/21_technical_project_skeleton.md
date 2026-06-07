@@ -13,7 +13,7 @@ SQLite 保存事实
 -> 反馈再进入下一轮画像与推荐
 ```
 
-Hermes 是智能生成层，不直接写 ARC SQLite，不直接发飞书。ARC 是业务账本、投递和审计系统。当前 Hermes native profile snapshot 由 Hermes 生成，但输入证据以 ARC SQLite reading profile 和 ARC applied memory 为主，SOUL 只作为低优先级背景。ARC 会把这份阅读画像同步到 Hermes built-in `USER.md`，让 Hermes UI/CLI 的新会话也能看到同一条阅读画像 memory。反馈画像更新采用同一安全边界：Hermes `reading.feedback.ingest` 只返回是否更新主画像的决策，ARC 负责写审计表和受控 upsert native `USER.md`。
+Hermes 是智能生成层，不直接写 ARC SQLite，不直接发飞书。ARC 是业务账本、投递和审计系统。Hermes 原生 `/home/ubuntu/.hermes/memories/USER.md` 中的 `[arc-reading-profile]` 是当前主画像事实源；`memory/HERMES_NATIVE_PROFILE.md` 只作为 ARC 本地兼容/诊断快照。反馈画像更新采用同一安全边界：Hermes `reading.feedback.ingest` 基于当前原生 USER 画像和新反馈返回是否更新主画像的决策，ARC 负责写审计表和受控 upsert native `USER.md`。
 
 ## 2. 核心目录
 
@@ -30,14 +30,14 @@ app/
   reading_pack.py         deep_read_pack 生成、artifact、Markdown、阅读包预览
   reflection.py           反思草稿、审批、应用、memory change log
   reflection_adapter.py   Hermes/custom reflection adapter
-  memory.py               ARC memory 文件读取、Hermes native profile snapshot
+  memory.py               Hermes 原生 USER 主画像读取、ARC memory 与兼容快照
   source_collector.py     Tavily/公开来源采集与来源质量评分
   lark.py                 飞书卡片和 webhook
   server.py               传统 HTML 反馈/阅读页面
   api/                    前后端分离 JSON API
 
 web/                      Vite/React 前端
-memory/                   ARC 已应用 memory 与 Hermes native profile snapshot
+memory/                   ARC 已应用 memory、change logs 与兼容/诊断快照
 library/                  reading pack / guided reading artifact
 data/                     SQLite 数据库
 deploy/                   systemd/nginx 部署文件
@@ -60,17 +60,20 @@ Settings.from_env()
 -> ReadingCoachWorkflow.run_daily_recommendations()
    -> process_feedback()
       -> 对未处理 feedback_events 调用 Hermes reading.feedback.ingest
+      -> payload 包含当前 /home/ubuntu/.hermes/memories/USER.md 的 [arc-reading-profile]
       -> 写 hermes_profile_update_events 审计
       -> 如果 Hermes 明确要求更新，ARC upsert /home/ubuntu/.hermes/memories/USER.md 的 [arc-reading-profile] entry
       -> 再按 ARC 规则更新 profile_items 并标记 feedback processed
    -> HermesNativeProfileProvider.load_context()
-      -> 读 memory/HERMES_NATIVE_PROFILE.md
-      -> 缺失或仅含“缺少个人阅读事实”占位时，调用 reading.profile.sync_snapshot
-      -> Hermes 基于 ARC reading profile + ARC applied memory + 低优先级 SOUL 生成 snapshot
-      -> upsert 到 /home/ubuntu/.hermes/memories/USER.md 的 [arc-reading-profile] entry
+      -> 优先读 /home/ubuntu/.hermes/memories/USER.md 的 [arc-reading-profile]
+      -> 如果原生 entry 缺失，才读 memory/HERMES_NATIVE_PROFILE.md 作为兼容来源
+      -> 如果兼容快照缺失或占位，调用 reading.profile.sync_snapshot
+      -> 同步 compact entry 到 /home/ubuntu/.hermes/memories/USER.md
    -> build_profile_context(repo)
    -> load_long_term_memory_context(memory/USER.md, memory/MEMORY.md)
    -> build_daily_profile_context(Priority 1-5)
+   -> build_recommendation_history_context(repo)
+      -> Hard exclusions / Negative feedback / Positive anchors / History fatigue / Recent recommendations
    -> Hermes reading.recommend.intent 生成主题
    -> Tavily 搜索书源
    -> Hermes reading.recommend.generate 生成候选书
@@ -87,14 +90,14 @@ Settings.from_env()
 daily prompt 使用固定优先级：
 
 ```text
-Priority 1: Hermes native profile snapshot
+Priority 1: Hermes native USER memory reading profile
 Priority 2: User explicit ARC feedback
 Priority 3: ARC inferred reading profile
 Priority 4: ARC applied reflection memory
 Priority 5: Single-run weak signals
 ```
 
-注意：当前 `/home/ubuntu/.hermes/SOUL.md` 是 Hermes Agent 身份说明，不是用户画像。因此 native snapshot 不能只依赖 SOUL。2026-06-05 已调整为由 ARC reading profile 和 ARC applied memory 提供主证据，Hermes 负责把这些证据整理成 `memory/HERMES_NATIVE_PROFILE.md`。
+注意：当前 `/home/ubuntu/.hermes/SOUL.md` 是 Hermes Agent 身份说明，不是用户画像。因此主画像必须来自 Hermes 原生 `USER.md` 中的 `[arc-reading-profile]`。`memory/HERMES_NATIVE_PROFILE.md` 只在原生 entry 缺失时作为兼容/诊断快照使用。
 
 Hermes native memory 的真实位置是当前 `HERMES_HOME/memories/USER.md`。默认部署中为：
 
@@ -114,6 +117,7 @@ ARC 只管理其中一条 entry：
 
 ```text
 feedback_events(processed_at IS NULL)
+-> read native USER.md [arc-reading-profile]
 -> Hermes route: reading.feedback.ingest
    output_schema: profile_update_v1
    output: should_update_native_memory / memory_entry / rationale / confidence / evidence_summary
@@ -123,6 +127,19 @@ feedback_events(processed_at IS NULL)
 -> ARC profile_items
 -> feedback_events.processed_at
 ```
+
+推荐历史上下文链路：
+
+```text
+recommendations + feedback_events
+-> build_recommendation_history_context()
+-> RecommendationHistoryContext:
+   Hard exclusions / Negative feedback / Positive anchors / History fatigue / Recent recommendations
+-> reading.recommend.intent
+-> reading.recommend.generate
+```
+
+推荐历史不写入 Hermes 原生 USER memory。Hermes 用它做语义选书和避让，ARC 仍负责写库、审计和硬校验。
 
 失败边界：
 
@@ -273,8 +290,8 @@ artifact: library/2026/06/2026-06-05__活着/reading-pack.md
 判断：
 
 - Hermes daily 确实基于现有 ARC reading profile 生成了文学/经典方向推荐。
-- Hermes native snapshot 已由 Hermes 基于 ARC 证据刷新，当前包含用户对经典名著、高口碑文学、科幻作品、个人知识管理、软件工程实践和 AI Agent 商业化降频的画像判断。
-- ARC 已支持把该 snapshot/upsert entry 写入 Hermes native `/home/ubuntu/.hermes/memories/USER.md`。这解决了“ARC 侧有画像但 Hermes UI 看不到”的问题；反馈事件自动驱动 Hermes 主画像增量更新仍属于下一阶段。
+- Hermes 原生 `/home/ubuntu/.hermes/memories/USER.md` 已包含 `[arc-reading-profile]`，当前主画像读源是这条原生 memory entry。
+- `memory/HERMES_NATIVE_PROFILE.md` 只作为 ARC 兼容/诊断快照；反馈事件已经能通过 Hermes `reading.feedback.ingest` 驱动原生主画像增量更新。
 
 native USER memory 同步验证：
 

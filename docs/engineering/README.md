@@ -38,6 +38,7 @@
 22. [技术项目骨架与运行流程](./21_technical_project_skeleton.md)：说明目录职责、正常日推链路、画像优先级、Hermes native `USER.md` 同步、Hermes 严格模式、关键配置、验证命令和大改后的文档/提交规则。
 23. [2026-06-02 Hermes / ARC / Feishu 总结](./development_history/2026-06-02_hermes_arc_delivery_and_reading_ui_summary.md)：总结 Hermes 默认生成、长快读包、ARC 阅读页、飞书投递可靠性、移动端阅读体验修复、验证结果和 GitHub 认证恢复步骤。
 24. [2026-06-05 Hermes Native USER Memory 同步](./development_history/2026-06-05_hermes_native_user_memory_sync.md)：记录 Hermes UI 看不到 ARC snapshot 的原因、真实 native memory 路径和 `[arc-reading-profile]` upsert 方案。
+25. [2026-06-07 Hermes 原生主画像与推荐历史上下文](./development_history/2026-06-07_hermes_native_profile_history_context.md)：记录 Hermes 原生 USER memory 成为主画像读源、ARC 生成 `RecommendationHistoryContext`、hard-exclusion 校验和 session 边界。
 
 新增 systemd 单元：
 
