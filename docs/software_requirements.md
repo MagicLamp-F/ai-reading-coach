@@ -77,7 +77,7 @@ python3 -m app.cli seed-profile --file prompts/user_manual.example.md
 系统应支持：
 
 - 读取用户画像、历史反馈、近期推荐和 long-term memory。
-- 优先读取 Hermes native profile snapshot。
+- 优先读取 ARC 本地 Hermes 画像快照。
 - 调用 Hermes 生成推荐主题和候选书。
 - 搜索/采集公开书源。
 - 基于来源质量筛选候选。
@@ -150,26 +150,28 @@ POST /api/reading-packs/{reading_pack_id}/feedback
 
 - `run-daily` 开始时处理未处理反馈。
 - 将反馈事件和推荐上下文发送给 Hermes `reading.feedback.ingest`。
-- Hermes 返回是否更新 native USER memory。
+- Hermes 返回是否更新 Hermes 原生 USER memory。
 - ARC 写入 `hermes_profile_update_events` 审计。
-- Hermes 明确要求更新时，ARC 受控 upsert native `USER.md` 中 `[arc-reading-profile]` entry。
+- Hermes 明确要求更新时，ARC 受控 upsert Hermes 原生 `USER.md` 中 `[arc-reading-profile]` entry。
 - 再按 ARC 本地规则更新 `profile_items`。
 - 成功后标记 `feedback_events.processed_at`。
 
 验收：
 
 - 成功更新时审计 `status='applied'`。
-- 跳过时审计 `status='skipped'`，不写 native USER memory。
+- 跳过时审计 `status='skipped'`，不写 Hermes 原生 USER memory。
 - 失败时审计 `status='failed'`，反馈保持未处理，`run-daily` 失败。
 - 不允许 fallback。
 
-### F6. Hermes native profile snapshot
+### F6. ARC 本地 Hermes 画像快照和 Hermes 原生 memory 同步
 
 系统应支持：
 
 - 读取 `memory/HERMES_NATIVE_PROFILE.md` 作为最高优先级画像上下文。
+- 明确该文件是 ARC 仓库内的 Hermes 生成画像快照/cache，不是 Hermes 原生 memory。
 - 文件缺失或占位时，调用 Hermes `reading.profile.sync_snapshot` 生成。
-- 同步 compact entry 到 `/home/ubuntu/.hermes/memories/USER.md`。
+- 同步 compact entry 到 Hermes 原生 `/home/ubuntu/.hermes/memories/USER.md`。
+- 明确 Hermes-agent 项目目录只是代码/安装目录；真实原生 memory 目录由 `HERMES_HOME` 决定。
 - 提供诊断命令查看同步状态。
 
 关键命令：
@@ -180,7 +182,7 @@ python3 -m app.cli show-hermes-profile-sync --json
 
 验收：
 
-- 输出 snapshot 是否存在、native USER memory 路径、是否存在 `[arc-reading-profile]` entry。
+- 输出 ARC 本地 snapshot 是否存在、Hermes 原生 USER memory 路径、是否存在 `[arc-reading-profile]` entry。
 
 ### F7. Reflection
 
@@ -288,7 +290,7 @@ python3 scripts/backup_sqlite.py
 
 - 反馈 URL 使用 HMAC token。
 - Hermes route agent 不直接写 SQLite、不发消息、不任意改 memory。
-- ARC 只 upsert native `USER.md` 的 `[arc-reading-profile]` entry。
+- ARC 只 upsert Hermes 原生 `USER.md` 的 `[arc-reading-profile]` entry。
 
 ### 可维护
 
@@ -323,4 +325,4 @@ python3 -m unittest discover
 - `.env.example` 已补齐当前 Hermes、source-aware、reading pack 和 reflection 关键配置；真实密钥和公网地址仍需本机 `.env` 配置。
 - 多用户身份和反馈去重尚未实现。
 - Web 前端部署、HTTPS、公网域名和飞书应用机器人还未完全产品化。
-- Hermes native USER memory 写入后，已有 Hermes UI 会话可能不会立刻加载；通常需要新会话。
+- Hermes 原生 USER memory 写入后，已有 Hermes UI 会话可能不会立刻加载；通常需要新会话。

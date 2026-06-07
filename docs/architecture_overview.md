@@ -19,7 +19,7 @@ AI Reading Coach 由三层组成：
 
 - SQLite 是事实账本。
 - Hermes 是生成和主画像判断层。
-- ARC 是唯一业务写入者：写 SQLite、写 artifact、写 native USER memory、发飞书。
+- ARC 是唯一业务写入者：写 SQLite、写 artifact、写 Hermes 原生 USER memory、发飞书。
 - Hermes route agent 不直接写 ARC SQLite、不发消息、不任意改文件。
 - 正常 Hermes provider 失败必须暴露，不用 fallback 掩盖。
 
@@ -42,7 +42,7 @@ AI Reading Coach 由三层组成：
 |  profile_ingest.py -> Hermes feedback ingest + USER upsert    |
 |  reading_pack.py -> deep read pack generation and artifact    |
 |  reflection.py -> reflection draft / approve / apply          |
-|  memory.py     -> ARC memory + Hermes native profile snapshot |
+|  memory.py     -> ARC memory + local Hermes profile snapshot   |
 |  server.py     -> HTML feedback and reading pages             |
 |  app/api/      -> FastAPI JSON API                            |
 |  repository.py -> SQLite access                              |
@@ -119,10 +119,13 @@ memory/MEMORY.md
   ARC applied reflection memory。
 
 memory/HERMES_NATIVE_PROFILE.md
-  ARC 可读的 Hermes native profile snapshot。
+  ARC 仓库内的 Hermes 生成画像快照/cache，不是 Hermes 原生 memory。
 
 /home/ubuntu/.hermes/memories/USER.md
-  Hermes native USER memory。ARC 只维护 [arc-reading-profile] 这一条 entry。
+  Hermes 原生 USER memory。ARC 只维护 [arc-reading-profile] 这一条 entry。
+
+/home/ubuntu/projects/hermes-agent
+  Hermes-agent 代码或安装目录，不是默认 memory 目录。真实 memory 目录由 HERMES_HOME 决定。
 ```
 
 ### Guided Reading
@@ -168,12 +171,12 @@ python3 -m app.cli run-daily
    - 读取 feedback_events where processed_at is null
    - 调用 Hermes reading.feedback.ingest
    - 写 hermes_profile_update_events
-   - 如 applied，upsert Hermes native USER.md
+   - 如 applied，upsert Hermes 原生 USER.md
    - 按 ARC 规则更新 profile_items
    - mark_feedback_processed()
 
 5. 构造画像上下文
-   - Priority 1: Hermes native profile snapshot
+   - Priority 1: ARC 本地 Hermes 画像快照
    - Priority 2: explicit ARC feedback
    - Priority 3: ARC inferred reading profile
    - Priority 4: ARC applied reflection memory
@@ -218,7 +221,7 @@ User clicks feedback
 -> reflect-json route reading.feedback.ingest
 -> profile_update_v1 response
 -> hermes_profile_update_events audit
--> optional upsert /home/ubuntu/.hermes/memories/USER.md
+-> optional upsert Hermes 原生 /home/ubuntu/.hermes/memories/USER.md
 -> ARC profile_items update
 -> feedback_events.processed_at set
 ```
@@ -233,7 +236,11 @@ User clicks feedback
 
 这条链路不 fallback。原因是 fallback 会把主画像错误隐藏起来，后续推荐会继续被污染。
 
-## 6. Hermes native profile 读取流程
+## 6. ARC 本地 Hermes 画像快照读取流程
+
+`memory/HERMES_NATIVE_PROFILE.md` 是 ARC 本地 cache。它保存 Hermes 基于 ARC evidence 生成的紧凑画像，供 daily prompt 直接使用；它不是 Hermes UI/CLI 自己读取的原生 memory。
+
+Hermes 原生用户 memory 位于当前 `HERMES_HOME/memories/USER.md`。当前默认路径是 `/home/ubuntu/.hermes/memories/USER.md`。`/home/ubuntu/projects/hermes-agent` 是 Hermes-agent 代码或安装目录，除非显式把 `HERMES_HOME` 配到那里，否则不会成为 memory 目录。
 
 ```text
 HermesNativeProfileProvider.load_context()
@@ -241,8 +248,8 @@ HermesNativeProfileProvider.load_context()
 -> if missing/placeholder:
      call reading.profile.sync_snapshot
      write memory/HERMES_NATIVE_PROFILE.md
-     upsert native USER.md
--> return snapshot as Priority 1 context
+     upsert Hermes 原生 USER.md [arc-reading-profile]
+-> return local snapshot as Priority 1 context
 ```
 
 诊断命令：
@@ -291,7 +298,7 @@ generate-reflection / run-daily auto reflection
 -> write memory/change_logs
 ```
 
-Reflection 写的是 ARC memory，不等同于 Hermes native USER memory。Hermes native USER memory 的 ARC 管理 entry 由 `memory.py` 和 `profile_ingest.py` 受控更新。
+Reflection 写的是 ARC memory，不等同于 Hermes 原生 USER memory。Hermes 原生 USER memory 的 ARC 管理 entry 由 `memory.py` 和 `profile_ingest.py` 受控更新。
 
 ## 9. API 和 Web 设计状态
 
@@ -338,6 +345,8 @@ DAILY_REFLECTION_ENABLED=true
 HERMES_REFLECTION_AUTO_APPLY=true
 ```
 
+`HERMES_NATIVE_PROFILE_PATH` 是 ARC 本地快照路径。`HERMES_NATIVE_USER_MEMORY_PATH` 是 Hermes 原生 memory 路径，通常等于 `$HERMES_HOME/memories/USER.md`。
+
 ## 11. 关键节点清单
 
 接手项目时优先看这些节点：
@@ -358,7 +367,7 @@ HERMES_REFLECTION_AUTO_APPLY=true
    反馈如何交给 Hermes 构造主画像。
 
 6. `app/memory.py`
-   Hermes native profile snapshot 和 native USER memory 同步。
+   ARC 本地 Hermes 画像快照读取，以及 Hermes 原生 USER memory 同步。
 
 7. `app/reading_pack.py`
    深度读书包生成、artifact 和来源链接。

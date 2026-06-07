@@ -14,8 +14,8 @@
 - OpenAI 兼容 Chat Completions 生成主题和推荐；无 Key 或调用失败时自动使用保守默认主题和降级推荐。
 - 每天按 `.env` 的 `DAILY_PUSH_TIME` 推送。
 - 每周日 20:00 推送 7 天画像复盘。
-- 日推会优先读取 Hermes native profile snapshot（默认 `memory/HERMES_NATIVE_PROFILE.md`）；缺失或仅含占位信息时，会让 Hermes 基于 ARC 阅读画像和已应用 memory 生成 snapshot，再进入推荐。
-- 未处理反馈会在下一次 `run-daily` 开始时交给 Hermes `reading.feedback.ingest` 判断是否更新主画像；ARC 记录 `hermes_profile_update_events` 审计，并只受控写入 Hermes native `USER.md` 的 `[arc-reading-profile]` entry。
+- 日推会优先读取 ARC 本地 Hermes 画像快照（默认 `memory/HERMES_NATIVE_PROFILE.md`）；缺失或仅含占位信息时，会让 Hermes 基于 ARC 阅读画像和已应用 memory 生成 snapshot，再进入推荐。这个文件不是 Hermes 原生 memory；Hermes 原生用户记忆默认在 `/home/ubuntu/.hermes/memories/USER.md`。
+- 未处理反馈会在下一次 `run-daily` 开始时交给 Hermes `reading.feedback.ingest` 判断是否更新主画像；ARC 记录 `hermes_profile_update_events` 审计，并只受控写入 Hermes 原生 `USER.md` 的 `[arc-reading-profile]` entry。
 - Hermes provider 默认严格失败：配置 `hermes-agent` 后，如果 Hermes route 无输出或无效 JSON，任务会失败并记录错误，不再静默生成 fallback 内容。
 - Hermes reflection 支持可插拔 adapter：默认可用 custom reflection；切换到外部 `hermes-agent` 后走严格模式，失败会记录 failed run，不再静默回退。只有显式配置 `hermes-agent-fallback` 才允许回退到 custom。
 - `/metrics` 暴露基础 Prometheus 指标，默认端口 `9108`。

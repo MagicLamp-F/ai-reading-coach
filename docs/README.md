@@ -16,7 +16,7 @@ SQLite 事实账本
 - 每日推荐：`run-daily` 生成书籍推荐，写入 SQLite，并推送飞书卡片。
 - Hermes 推荐：主题、候选书、深度读书包和 reflection 可走 Hermes route。
 - 严格模式：配置 `hermes-agent` 后，Hermes route 失败会让任务失败，不静默 fallback。
-- Hermes 主画像：优先读取 `memory/HERMES_NATIVE_PROFILE.md`，并同步到 Hermes native `USER.md` 的 `[arc-reading-profile]` entry。
+- Hermes 主画像：Hermes 判断画像更新；ARC 本地缓存 `memory/HERMES_NATIVE_PROFILE.md` 作为推荐 prompt 的画像快照，并同步 compact entry 到 Hermes 原生 `USER.md`。
 - 反馈画像 ingest：未处理反馈会进入 Hermes `reading.feedback.ingest`，Hermes 判断是否更新主画像；ARC 写 `hermes_profile_update_events` 审计。
 - 深度读书包：为推荐书生成结构化 deep read pack，并保存到 `reading_packs`、`artifacts` 和 `library/`。
 - 来源增强：可通过 Tavily 和公开页面采集书源摘录，给推荐和读书包提供来源上下文。
@@ -65,6 +65,8 @@ HERMES_AGENT_TIMEOUT_SECONDS=180
 HERMES_NATIVE_USER_MEMORY_PATH=/home/ubuntu/.hermes/memories/USER.md
 ```
 
+`/home/ubuntu/projects/hermes-agent` 是 Hermes-agent 的代码或安装目录，不是默认 memory 目录。Hermes 原生用户记忆由 `HERMES_HOME` 决定，当前默认路径是 `/home/ubuntu/.hermes/memories/USER.md`。
+
 ### 2. 初始化数据库
 
 ```bash
@@ -89,7 +91,7 @@ python3 -m app.cli run-daily
 处理未处理反馈
 -> 调用 Hermes feedback ingest
 -> 更新 ARC profile_items
--> 读取 Hermes native profile snapshot
+-> 读取 ARC 本地 Hermes 画像快照
 -> Hermes 生成主题和推荐
 -> 来源采集与排序
 -> Hermes 生成 deep read pack
@@ -181,7 +183,7 @@ app/                 Python 后端、CLI、workflow、Hermes adapters、SQLite r
 app/api/             FastAPI JSON API
 web/                 React/Vite 前端
 data/                SQLite 数据库
-memory/              ARC memory 和 Hermes native profile snapshot
+memory/              ARC applied memory、change logs 和 ARC 本地 Hermes 画像快照
 library/             deep read pack / guided reading artifact
 prompts/             用户说明书示例
 scripts/             备份脚本
@@ -194,5 +196,6 @@ docs/engineering/    历史工程设计、验证记录和开发过程文档
 
 - [软件需求说明](./software_requirements.md)：项目目标、用户角色、功能需求、非功能需求、验收标准。
 - [概要设计](./architecture_overview.md)：系统模块、数据流、核心流程、关键表和失败边界。
+- [Memory Model](./memory_model.md)：解释 ARC memory、ARC 本地 Hermes 画像快照和 Hermes 原生 memory 的区别。
 - [工程文档索引](./engineering/README.md)：历史设计、开发记录、运行手册。
 - [当前工程进展](./engineering/10_current_progress_summary.md)：最近一次工程状态总结。
