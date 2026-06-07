@@ -4,6 +4,7 @@ import json
 import logging
 import shlex
 import subprocess
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from app.search import SearchResult
@@ -44,6 +45,20 @@ class HermesDailyRecommendationAdapter:
         self.command = command.strip()
         self.timeout_seconds = timeout_seconds
         self.runner = runner
+        self._local_session: dict[str, Any] | None = None
+
+    def start_local_session(self, run_id: int, purpose: str = "run_daily") -> None:
+        self._local_session = {
+            "session_id": f"arc-{purpose}-{run_id}",
+            "scope": purpose,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "persistence": "bounded_to_current_arc_run",
+            "hermes_internal_thread": "not_supported_by_current_reflect_json_wrapper",
+            "turns": [],
+        }
+
+    def end_local_session(self) -> None:
+        self._local_session = None
 
     def generate_themes(self, profile_context: str, recommendation_history_context: str = "") -> list[str]:
         response = self._call(
@@ -64,6 +79,7 @@ class HermesDailyRecommendationAdapter:
                 "context": {
                     "profile_context": profile_context,
                     "recommendation_history_context": recommendation_history_context,
+                    "local_session": self._local_session_context(),
                 },
                 "output_contract": {"themes": ["string"]},
                 "constraints": _constraints(),
@@ -72,7 +88,13 @@ class HermesDailyRecommendationAdapter:
         themes = response.get("themes")
         if not isinstance(themes, list) or not themes:
             raise DailyAgentAdapterError("Hermes returned no themes")
-        return [str(theme)[:80] for theme in themes if str(theme).strip()][:3]
+        normalized = [str(theme)[:80] for theme in themes if str(theme).strip()][:3]
+        self._remember_local_turn(
+            "reading.recommend.intent",
+            {"profile_context_chars": len(profile_context), "history_context_chars": len(recommendation_history_context)},
+            {"themes": normalized},
+        )
+        return normalized
 
     def generate_recommendations(
         self,
@@ -111,6 +133,7 @@ class HermesDailyRecommendationAdapter:
                     "recommendation_history_context": recommendation_history_context,
                     "themes": themes,
                     "search_results": search_context,
+                    "local_session": self._local_session_context(),
                 },
                 "output_contract": {
                     "books": [
@@ -136,7 +159,13 @@ class HermesDailyRecommendationAdapter:
         books = response.get("books")
         if not isinstance(books, list) or not books:
             raise DailyAgentAdapterError("Hermes returned no recommendation books")
-        return [book for book in books if isinstance(book, dict)][:max_books]
+        normalized = [book for book in books if isinstance(book, dict)][:max_books]
+        self._remember_local_turn(
+            "reading.recommend.generate",
+            {"theme_count": len(themes), "search_result_count": len(search_results), "max_books": max_books},
+            {"books": [{"title": str(book.get("title", ""))[:120], "author": str(book.get("author", ""))[:120]} for book in normalized]},
+        )
+        return normalized
 
     def _call(self, payload: dict[str, Any]) -> dict[str, Any]:
         argv = shlex.split(self.command)
@@ -167,6 +196,35 @@ class HermesDailyRecommendationAdapter:
         if not isinstance(response, dict):
             raise DailyAgentAdapterError("Hermes daily command returned non-object JSON")
         return response
+
+    def _local_session_context(self) -> dict[str, Any]:
+        if self._local_session is None:
+            return {
+                "enabled": False,
+                "reason": "no active ARC run-local session",
+            }
+        return {
+            "enabled": True,
+            "session_id": self._local_session["session_id"],
+            "scope": self._local_session["scope"],
+            "persistence": self._local_session["persistence"],
+            "hermes_internal_thread": self._local_session["hermes_internal_thread"],
+            "previous_turns": list(self._local_session.get("turns", []))[-4:],
+        }
+
+    def _remember_local_turn(self, route: str, request_summary: dict[str, Any], response_summary: dict[str, Any]) -> None:
+        if self._local_session is None:
+            return
+        turns = self._local_session.setdefault("turns", [])
+        if isinstance(turns, list):
+            turns.append(
+                {
+                    "route": route,
+                    "request_summary": request_summary,
+                    "response_summary": response_summary,
+                }
+            )
+            del turns[:-4]
 
 
 def _constraints() -> dict[str, bool]:

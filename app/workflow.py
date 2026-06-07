@@ -146,6 +146,7 @@ class ReadingCoachWorkflow:
 
     def run_daily_recommendations(self) -> int:
         run_id = self.repo.create_run("daily_recommendation", {"channel": self.channel})
+        self._start_daily_agent_local_session(run_id)
         api_calls = 0
         try:
             processed_feedback = process_feedback(self.repo, profile_ingestor=self.profile_ingestor)
@@ -238,10 +239,22 @@ class ReadingCoachWorkflow:
             logger.exception("Daily recommendation run failed")
             self.repo.finish_run(run_id, "failed", error_message=str(exc), api_calls=api_calls)
             raise
+        finally:
+            self._end_daily_agent_local_session()
 
     @property
     def max_daily_api_calls(self) -> int:
         return self.max_search_calls + self.max_model_calls
+
+    def _start_daily_agent_local_session(self, run_id: int) -> None:
+        starter = getattr(self.daily_recommendation_agent, "start_local_session", None)
+        if callable(starter):
+            starter(run_id=run_id, purpose="run_daily")
+
+    def _end_daily_agent_local_session(self) -> None:
+        closer = getattr(self.daily_recommendation_agent, "end_local_session", None)
+        if callable(closer):
+            closer()
 
     def build_weekly_report(self) -> str:
         days = 7
@@ -819,11 +832,19 @@ def build_recommendation_history_context(repo: Repository, days: int = 60, limit
     for row in feedback_rows:
         feedback_by_recommendation.setdefault(int(row["recommendation_id"]), []).append(row)
 
-    hard_exclusions = []
-    negative_signals = []
-    positive_anchors = []
-    recent_lines = []
+    hard_exclusions: list[str] = []
+    cooldown_exact_titles: list[str] = []
+    negative_signals: list[str] = []
+    positive_anchors: list[str] = []
+    neutral_signals: list[str] = []
+    recent_lines: list[str] = []
     theme_counts: dict[str, int] = {}
+    title_counts: dict[tuple[str, str], int] = {}
+    title_labels: dict[tuple[str, str], str] = {}
+    feedback_type_counts: dict[str, int] = {}
+    feedback_reason_counts: dict[str, int] = {}
+    negative_theme_counts: dict[str, int] = {}
+    positive_theme_counts: dict[str, int] = {}
 
     for row in recommendations:
         recommendation_id = int(row["id"])
@@ -832,49 +853,123 @@ def build_recommendation_history_context(repo: Repository, days: int = 60, limit
         theme = str(row["theme"] or "")
         slot_type = str(row["slot_type"] or "")
         theme_counts[theme] = theme_counts.get(theme, 0) + 1
+        key = _book_key(title, author)
+        title_counts[key] = title_counts.get(key, 0) + 1
+        title_labels[key] = f"{title} / {author}"
         feedback = feedback_by_recommendation.get(recommendation_id, [])
         feedback_summary = _recommendation_feedback_summary(feedback)
         recent_lines.append(
             f"- {title} / {author} | theme={theme} | slot={slot_type} | feedback={feedback_summary or 'none'}"
         )
+        cooldown_exact_titles.append(f"- {title} / {author}: recommended recently; avoid exact repeat unless user explicitly asks")
         if any(str(item["feedback_type"]) == "already_read" for item in feedback):
             hard_exclusions.append(f"- {title} / {author}: user marked already_read")
         if any(str(item["feedback_type"]) == "not_interested" for item in feedback):
             negative_signals.append(f"- {title} / {author}: {_recommendation_feedback_summary(feedback)}")
+            negative_theme_counts[theme] = negative_theme_counts.get(theme, 0) + 1
+        if any(str(item["feedback_type"]) == "neutral" for item in feedback):
+            neutral_signals.append(f"- {title} / {author}: {_recommendation_feedback_summary(feedback)}")
         if any(str(item["feedback_type"]) in {"like", "go_deeper"} for item in feedback):
             positive_anchors.append(f"- {title} / {author}: {_recommendation_feedback_summary(feedback)}")
+            positive_theme_counts[theme] = positive_theme_counts.get(theme, 0) + 1
+
+    for row in feedback_rows:
+        feedback_type = str(row["feedback_type"] or "")
+        reason_code = str(row["reason_code"] or "")
+        if feedback_type:
+            feedback_type_counts[feedback_type] = feedback_type_counts.get(feedback_type, 0) + 1
+        if reason_code:
+            feedback_reason_counts[reason_code] = feedback_reason_counts.get(reason_code, 0) + 1
 
     repeated_themes = [
         f"- {theme}: recommended {count} times in recent {days} days"
         for theme, count in sorted(theme_counts.items(), key=lambda item: (-item[1], item[0]))
         if theme and count >= 2
     ]
+    repeated_titles = [
+        f"- {title_labels[key]}: recommended {count} times in recent {days} days"
+        for key, count in sorted(title_counts.items(), key=lambda item: (-item[1], title_labels.get(item[0], "")))
+        if key[0] and count >= 2
+    ]
+    feedback_distribution = _feedback_distribution_lines(feedback_type_counts, feedback_reason_counts)
+    positive_theme_lines = _theme_signal_lines(positive_theme_counts, days, "positive feedback")
+    negative_theme_lines = _theme_signal_lines(negative_theme_counts, days, "negative feedback")
 
     sections = [
         "RecommendationHistoryContext:",
         "",
+        "Window summary:",
+        f"- Lookback days: {days}",
+        f"- Recent recommendations included: {len(recommendations)}",
+        f"- Feedback events included: {len(feedback_rows)}",
+        f"- Hard exclusions: {len(hard_exclusions)}",
+        f"- Recent exact-title cooldowns: {len(cooldown_exact_titles)}",
+        "",
         "Hard exclusions:",
         *(hard_exclusions[:8] or ["- None."]),
+        "",
+        "Recent exact-title cooldown:",
+        *(cooldown_exact_titles[:12] or ["- None."]),
         "",
         "Negative feedback:",
         *(negative_signals[:8] or ["- None."]),
         "",
+        "Neutral / weak-fit feedback:",
+        *(neutral_signals[:6] or ["- None."]),
+        "",
         "Positive anchors:",
         *(positive_anchors[:8] or ["- None."]),
         "",
+        "Feedback distribution:",
+        *feedback_distribution,
+        "",
         "History fatigue:",
         *(repeated_themes[:6] or ["- None."]),
+        "",
+        "Repeated exact-title signals:",
+        *(repeated_titles[:6] or ["- None."]),
+        "",
+        "Positive theme signals:",
+        *(positive_theme_lines[:6] or ["- None."]),
+        "",
+        "Negative theme signals:",
+        *(negative_theme_lines[:6] or ["- None."]),
         "",
         "Recent recommendations:",
         *recent_lines[:limit],
         "",
         "Hermes selection instruction:",
         "- Do not recommend hard exclusions.",
+        "- Avoid recent exact-title cooldown items even if they are not already_read.",
         "- Treat negative feedback as a semantic avoidance signal, not just exact-title exclusion.",
+        "- Treat neutral feedback and weak-fit reasons as evidence to adjust angle, difficulty, timing, or source quality.",
         "- Use positive anchors to find adjacent books, but avoid repeating the same title or theme too frequently.",
+        "- Prefer a mixed slate: stable profile-fit classics plus one exploration only when history does not show fatigue.",
         "- Include history_check in each candidate when possible.",
     ]
     return "\n".join(sections)
+
+
+def _feedback_distribution_lines(feedback_type_counts: dict[str, int], feedback_reason_counts: dict[str, int]) -> list[str]:
+    if not feedback_type_counts and not feedback_reason_counts:
+        return ["- None."]
+    lines = [
+        f"- type={FEEDBACK_LABELS.get(feedback_type, feedback_type)} ({feedback_type}): {count}"
+        for feedback_type, count in sorted(feedback_type_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    reason_lines = [
+        f"- reason={FEEDBACK_REASON_LABELS.get(reason_code, reason_code)} ({reason_code}): {count}"
+        for reason_code, count in sorted(feedback_reason_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return lines[:6] + reason_lines[:8]
+
+
+def _theme_signal_lines(theme_counts: dict[str, int], days: int, label: str) -> list[str]:
+    return [
+        f"- {theme}: {count} {label} event(s) in recent {days} days"
+        for theme, count in sorted(theme_counts.items(), key=lambda item: (-item[1], item[0]))
+        if theme
+    ]
 
 
 def _recommendation_hard_exclusion_keys(repo: Repository, feedback_days: int = 365, recent_days: int = 14) -> set[tuple[str, str]]:

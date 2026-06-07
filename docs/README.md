@@ -15,6 +15,8 @@ SQLite 事实账本
 
 - 每日推荐：`run-daily` 生成书籍推荐，写入 SQLite，并推送飞书卡片。
 - Hermes 推荐：主题、候选书、深度读书包和 reflection 可走 Hermes route。
+- 推荐历史：ARC 从 SQLite 生成增强版 `RecommendationHistoryContext`，显式提供 hard exclusions、近期 exact-title cooldown、反馈分布、重复标题/主题和正负反馈信号。
+- 短局部链路：当前 Hermes `reflect-json` 是 `--oneshot` 调用，不暴露可控 session/thread id；`run-daily` 内通过 ARC `local_session` context 串联主题和候选书生成。
 - 严格模式：配置 `hermes-agent` 后，Hermes route 失败会让任务失败，不静默 fallback。
 - Hermes 主画像：Hermes 原生 `USER.md` 中的 `[arc-reading-profile]` 是主画像读源；ARC 本地 `memory/HERMES_NATIVE_PROFILE.md` 仅作为兼容/诊断快照。
 - 推荐历史上下文：ARC 从 SQLite 推荐和反馈历史生成 `RecommendationHistoryContext`，交给 Hermes 做语义选书和避让。
@@ -152,7 +154,7 @@ Compose 默认启动 API 与 Vite Web 开发服务。生产部署可使用 `depl
 
 | 服务 | 默认地址 | 说明 |
 | --- | --- | --- |
-| React Web 前端 | `http://localhost:8010/` | 阅读包、分日导读和管理入口 |
+| React Web 前端 | `http://localhost:8010/` | 移动端门面、阅读包、分日导读和管理入口 |
 | Web 代理 API | `http://localhost:8010/api/healthz` | 通过 Vite/nginx 访问后端 |
 | 后端 API | `http://localhost:8000/api/healthz` | FastAPI JSON API |
 | 传统 HTML 服务 | `http://localhost:8000/healthz` | `run-server` 反馈/阅读页 |

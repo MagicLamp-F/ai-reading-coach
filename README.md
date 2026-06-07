@@ -20,11 +20,12 @@ Hermes 原生 USER.md [arc-reading-profile] 作为主画像
 - 每天按 `.env` 的 `DAILY_PUSH_TIME` 推送。
 - 每周日 20:00 推送 7 天画像复盘。
 - 日推会优先读取 Hermes 原生用户画像（默认 `/home/ubuntu/.hermes/memories/USER.md` 中的 `[arc-reading-profile]`）；`memory/HERMES_NATIVE_PROFILE.md` 仅作为 ARC 本地兼容/诊断快照。
-- ARC 会从 SQLite 推荐和反馈历史生成 `RecommendationHistoryContext`，让 Hermes 选书时避开已读、负反馈和主题疲劳。
+- ARC 会从 SQLite 推荐和反馈历史生成增强版 `RecommendationHistoryContext`，包含 hard exclusions、近期 exact-title cooldown、反馈分布、重复标题/主题、正反馈锚点、负反馈/中性弱匹配信号和 Hermes selection instruction。
+- 当前 Hermes wrapper 仍是 `--oneshot` 非交互调用，不提供可控 session/thread id；同一次 `run-daily` 内的短局部链路通过 ARC 显式 `local_session` context 串联，跨天状态只落 Hermes 原生 memory 或 ARC SQLite。
 - 未处理反馈会在下一次 `run-daily` 开始时交给 Hermes `reading.feedback.ingest` 判断是否更新主画像；ARC 记录 `hermes_profile_update_events` 审计，并只受控写入 Hermes 原生 `USER.md` 的 `[arc-reading-profile]` entry。
 - Hermes provider 默认严格失败：配置 `hermes-agent` 后，如果 Hermes route 无输出或无效 JSON，任务会失败并记录错误，不再静默生成 fallback 内容。
 - 深度读书包会写入 `reading_packs`、`artifacts` 和 `library/`，并可在 Web 前端阅读。
-- React Web 前端提供阅读包、分日导读和管理入口。
+- React Web 前端根路径提供移动端兼容的个人阅读门面，入口包括阅读包、分日导读、导读计划和书源管理。
 - Hermes reflection 支持可插拔 adapter：默认可用 custom reflection；切换到外部 `hermes-agent` 后走严格模式，失败会记录 failed run，不再静默回退。只有显式配置 `hermes-agent-fallback` 才允许回退到 custom。
 - `/metrics` 暴露基础 Prometheus 指标，默认端口 `9108`。
 - 提供 systemd service/timer 和 SQLite 备份脚本，支持 7 天服务器试运行。
@@ -112,7 +113,7 @@ docker compose up --build -d
 
 | 服务 | 默认地址 | 说明 |
 | --- | --- | --- |
-| React Web 前端 | `http://localhost:8010/` | 阅读包、分日导读和管理入口 |
+| React Web 前端 | `http://localhost:8010/` | 移动端门面、阅读包、分日导读和管理入口 |
 | Web 代理 API | `http://localhost:8010/api/healthz` | 通过 Vite/nginx 访问后端 |
 | 后端 API | `http://localhost:8000/api/healthz` | FastAPI JSON API |
 | 传统 HTML 服务 | `http://localhost:8000/healthz` | `run-server` 反馈/阅读页 |

@@ -688,6 +688,89 @@ class WorkflowTests(unittest.TestCase):
                 self.assertIn("三体 / 刘慈欣: user marked already_read", user_prompt)
             conn.close()
 
+    def test_recommendation_history_context_includes_distribution_fatigue_and_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            seed_run_id = repo.create_run("seed")
+            first_id = repo.add_recommendation(
+                seed_run_id,
+                RecommendationDraft(
+                    title="一句顶一万句",
+                    author="刘震云",
+                    source_url="",
+                    slot_type="profile_fit",
+                    theme="当代文学",
+                    recommendation_reason="r",
+                    profile_mapping="m",
+                    system_hypothesis="h",
+                    profile_dimensions=["literature"],
+                    expected_benefit="b",
+                    risk="risk",
+                    reading_suggestion="s",
+                    metadata={},
+                ),
+                __import__("datetime").date.today(),
+            )
+            second_id = repo.add_recommendation(
+                seed_run_id,
+                RecommendationDraft(
+                    title="一句顶一万句",
+                    author="刘震云",
+                    source_url="",
+                    slot_type="profile_fit",
+                    theme="当代文学",
+                    recommendation_reason="r",
+                    profile_mapping="m",
+                    system_hypothesis="h",
+                    profile_dimensions=["literature"],
+                    expected_benefit="b",
+                    risk="risk",
+                    reading_suggestion="s",
+                    metadata={},
+                ),
+                __import__("datetime").date.today(),
+            )
+            third_id = repo.add_recommendation(
+                seed_run_id,
+                RecommendationDraft(
+                    title="营销增长实战",
+                    author="Author",
+                    source_url="",
+                    slot_type="exploration",
+                    theme="商业增长",
+                    recommendation_reason="r",
+                    profile_mapping="m",
+                    system_hypothesis="h",
+                    profile_dimensions=["business"],
+                    expected_benefit="b",
+                    risk="risk",
+                    reading_suggestion="s",
+                    metadata={},
+                ),
+                __import__("datetime").date.today(),
+            )
+            repo.add_feedback(first_id, "like", reason_code="topic_matches", free_text="文学气质对")
+            repo.add_feedback(second_id, "go_deeper", reason_code="want_reading_path")
+            repo.add_feedback(third_id, "not_interested", reason_code="too_marketing")
+
+            history_context = build_recommendation_history_context(repo)
+
+            self.assertIn("Window summary", history_context)
+            self.assertIn("Recent exact-title cooldown", history_context)
+            self.assertIn("一句顶一万句 / 刘震云: recommended recently", history_context)
+            self.assertIn("Feedback distribution", history_context)
+            self.assertIn("type=喜欢 (like): 1", history_context)
+            self.assertIn("reason=营销味太重 (too_marketing): 1", history_context)
+            self.assertIn("Repeated exact-title signals", history_context)
+            self.assertIn("一句顶一万句 / 刘震云: recommended 2 times", history_context)
+            self.assertIn("Positive theme signals", history_context)
+            self.assertIn("当代文学: 2 positive feedback event(s)", history_context)
+            self.assertIn("Negative theme signals", history_context)
+            self.assertIn("商业增长: 1 negative feedback event(s)", history_context)
+            conn.close()
+
     def test_daily_run_fails_when_all_candidates_are_hard_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

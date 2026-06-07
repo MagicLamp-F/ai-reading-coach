@@ -347,6 +347,7 @@ deploy/
 设计意图：
 
 - `run-api` 启动 FastAPI。
+- Web 根路径提供移动端兼容的个人阅读门面，聚合阅读包、分日导读、导读计划和书源管理入口。
 - Web 前端通过 `/api/reading-packs/{id}` 展示阅读包。
 - Web 前端通过 `/api/guided-reading/days/{id}` 展示分日导读。
 - 管理端 API 支持上传书源、创建阅读计划、查看计划。
