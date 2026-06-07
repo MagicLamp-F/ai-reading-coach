@@ -120,7 +120,19 @@ npm install
 npm run dev
 ```
 
-默认前端端口是 `8010`。
+默认前端网页：
+
+```text
+http://localhost:8010/
+```
+
+如果部署到服务器，前端网页通常是：
+
+```text
+http://<server-host>:8010/
+```
+
+其中 `<server-host>` 对应 `.env` 里的 `PUBLIC_BASE_URL` 主机名或 IP。
 
 ### 5. Docker Compose
 
@@ -131,6 +143,15 @@ docker compose up --build -d
 ```
 
 Compose 默认启动 API 与 Vite Web 开发服务。生产部署可使用 `deploy/nginx/ai-reading-coach.conf` 指向 `web/dist`。
+
+## 服务入口
+
+| 服务 | 默认地址 | 说明 |
+| --- | --- | --- |
+| React Web 前端 | `http://localhost:8010/` | 阅读包、分日导读和管理入口 |
+| Web 代理 API | `http://localhost:8010/api/healthz` | 通过 Vite/nginx 访问后端 |
+| 后端 API | `http://localhost:8000/api/healthz` | FastAPI JSON API |
+| 传统 HTML 服务 | `http://localhost:8000/healthz` | `run-server` 反馈/阅读页 |
 
 ## 常用命令
 
@@ -175,25 +196,3 @@ docs/engineering/    历史工程设计、验证记录和开发过程文档
 - [概要设计](./architecture_overview.md)：系统模块、数据流、核心流程、关键表和失败边界。
 - [工程文档索引](./engineering/README.md)：历史设计、开发记录、运行手册。
 - [当前工程进展](./engineering/10_current_progress_summary.md)：最近一次工程状态总结。
-
-## 当前状态
-
-最近一次已提交的核心能力是 Hermes feedback ingest：
-
-```text
-commit 25bd85e Wire Hermes feedback profile ingest
-```
-
-真实验证结果：
-
-```text
-feedback_events.id=27
-daily run_id=56 success
-processed_feedback=1
-hermes_profile_update_events.id=1 status=applied confidence=0.91
-recommendation_id=69: 围城 / 钱锺书
-reading_pack id=40 status=generated generator_provider=hermes-agent
-reflection run_id=57 success
-```
-
-如果工作区有未提交改动，先用 `git status --short` 区分代码变更和运行时 memory/artifact。
