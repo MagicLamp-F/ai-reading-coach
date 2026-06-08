@@ -8,6 +8,7 @@
 - 2026-06-08：已落地候选过滤解释 artifact。每次 `run-daily` 会写 `recommendation_candidate_explainability` artifact，记录候选书是否 selected/rejected、`excluded_by`、source-aware 分数、source status 和 reject reason。本地 JSON 路径位于 `library/recommendation-decisions/YYYY/MM/`。
 - 2026-06-08：已落地 daily agent runtime capability 建模。每次 `run-daily` 创建 `run_logs` 后立即将 `hermes_runtime_capabilities` 写入 `run_logs.metadata_json`，记录当前 provider/runtime 是否支持 native thread、delegation、memory、file、terminal、web、session_search 以及是否允许副作用。
 - 2026-06-08：已落地 `reading.recommend.plan_v1` hint route。Hermes adapter 支持输出 3 个推荐 slot、搜索 query、候选标准和风险控制；ARC 只把 plan 当作主题/搜索 hint，仍由 ARC 执行推荐生成、hard exclusion、source-aware ranking、落库和投递。输出写入 `recommendation_plan` artifact，本地 JSON 路径位于 `library/recommendation-plans/YYYY/MM/`。
+- 2026-06-08：已落地 `reading.recommend.agentic_shadow_v1` shadow route。默认关闭，仅在 `ARC_ENABLE_AGENTIC_SHADOW=true` 或 `ReadingCoachWorkflow(..., agentic_shadow_enabled=True)` 时启用；输出写入 `recommendation_agentic_shadow` artifact，本地 JSON 路径位于 `library/agentic-shadows/YYYY/MM/`，并记录 `subagents_used`、roles、latency、trace mode 和 warnings。
 
 ## 1. 核心结论
 
@@ -681,11 +682,86 @@ plan_v1 不支持、返回空 slots、返回非 JSON object 或执行异常时�
 
 ### P2: Shadow Mode
 
-- [ ] 新增 `reading.recommend.agentic_shadow_v1` route。
-- [ ] 新增 shadow 配置项。
-- [ ] shadow 输出写 `artifacts` 或独立 audit JSON。
-- [ ] shadow 失败不影响 production run。
-- [ ] 记录 `subagents_used`、roles、cost、latency、warnings。
+- [x] 新增 `reading.recommend.agentic_shadow_v1` route。
+- [x] 新增 shadow 配置项。
+- [x] shadow 输出写 `artifacts` 或独立 audit JSON。
+- [x] shadow 失败不影响 production run。
+- [x] 记录 `subagents_used`、roles、cost、latency、warnings。
+
+当前实现：
+
+```text
+app/daily_agent_adapter.py
+  -> HermesDailyRecommendationAdapter.agentic_shadow_recommendations()
+  -> route: reading.recommend.agentic_shadow_v1
+  -> output_schema: agentic_shadow_v1
+  -> normalize_agentic_shadow()
+
+app/recommendation_agentic_shadow.py
+  -> RecommendationAgenticShadowService
+  -> 负责默认关闭、配置读取、调用 agent、延迟计时、记录 cost、写 recommendation_agentic_shadow artifact
+
+app/workflow.py
+  -> recommendation review shadow 后调用 agentic shadow
+  -> 调用位置在正式 recommendations / reading packs / delivery 前
+  -> shadow 结果不进入正式推荐决策
+```
+
+配置项：
+
+```env
+ARC_ENABLE_AGENTIC_SHADOW=false
+ARC_AGENTIC_SHADOW_MAX_SUBAGENTS=2
+ARC_AGENTIC_SHADOW_TIMEOUT_SECONDS=90
+ARC_AGENTIC_SHADOW_ALLOW_WEB_SEARCH=false
+ARC_AGENTIC_SHADOW_ALLOW_MEMORY=false
+ARC_AGENTIC_SHADOW_ALLOW_FILE=false
+ARC_AGENTIC_SHADOW_ALLOW_TERMINAL=false
+ARC_AGENTIC_SHADOW_ALLOW_SESSION_SEARCH=false
+```
+
+失败边界：
+
+```text
+agentic_shadow_v1 默认关闭；
+agent 不支持 route 时只写 run warning；
+route 执行异常或返回非 object 时只写 run warning；
+不修改 selected recommendations、SQLite 主业务表、USER.md、memory、delivery outbox 或消息通道。
+```
+
+输出示例：
+
+```json
+{
+  "schema_version": "agentic_shadow_v1",
+  "subagents_used": 2,
+  "roles": ["profile_history_reviewer", "source_quality_reviewer"],
+  "trace_mode": "simulated_trace",
+  "baseline_assessment": {
+    "profile_fit": 0.8,
+    "novelty": 0.6,
+    "start_path_quality": 0.7,
+    "source_validity": 0.9,
+    "risks": []
+  },
+  "shadow_recommendations": [],
+  "comparison": {
+    "baseline_strengths": ["stable"],
+    "shadow_strengths": ["more novel"],
+    "tradeoffs": ["needs evidence"],
+    "recommended_action": "observe_only"
+  },
+  "warnings": [],
+  "confidence": 0.7
+}
+```
+
+功能佐证：
+
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_hermes_adapter_runs_agentic_shadow_with_route_payload` 验证 Hermes payload 使用 `route=reading.recommend.agentic_shadow_v1`、`output_schema=agentic_shadow_v1`，并保留 no-side-effect constraints。
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_agentic_shadow_normalization_clamps_metadata` 验证 `subagents_used`、roles、trace mode 和 confidence 归一化。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_agentic_shadow_artifact_when_enabled` 验证启用 shadow 后，daily run 仍写正式 `recommendations`，同时写 `recommendation_agentic_shadow` artifact，并记录 `cost_logs.operation='reading.recommend.agentic_shadow_v1'`、`subagents_used` 和 `latency_ms`。
+- 验证命令：`python3 -m py_compile app/daily_agent_adapter.py app/recommendation_agentic_shadow.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ### P2: Evaluation
 

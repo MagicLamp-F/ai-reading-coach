@@ -17,6 +17,7 @@ EFFECTIVE_PROFILE_SUMMARY_MAX_LINES = 12
 THEME_INTENT_SCHEMA_VERSION = "themes_v2"
 RECOMMENDATION_PLAN_SCHEMA_VERSION = "recommendation_plan_v1"
 RECOMMENDATION_REVIEW_SCHEMA_VERSION = "recommendation_review_v1"
+AGENTIC_SHADOW_SCHEMA_VERSION = "agentic_shadow_v1"
 DAILY_AGENT_RUNTIME_CAPABILITY_SCHEMA_VERSION = "daily_agent_runtime_capabilities_v1"
 
 THEME_GENERATION_RULES = (
@@ -76,6 +77,18 @@ class DailyRecommendationAgentAdapter(Protocol):
         themes: list[str],
         generated_candidates: list[dict[str, Any]],
         selected_recommendations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ...
+
+    def agentic_shadow_recommendations(
+        self,
+        profile_context: str,
+        recommendation_history_context: str,
+        themes: list[str],
+        recommendation_plan: dict[str, Any] | None,
+        generated_candidates: list[dict[str, Any]],
+        selected_recommendations: list[dict[str, Any]],
+        shadow_config: dict[str, Any],
     ) -> dict[str, Any]:
         ...
 
@@ -400,6 +413,98 @@ class HermesDailyRecommendationAdapter:
         )
         return review
 
+    def agentic_shadow_recommendations(
+        self,
+        profile_context: str,
+        recommendation_history_context: str,
+        themes: list[str],
+        recommendation_plan: dict[str, Any] | None,
+        generated_candidates: list[dict[str, Any]],
+        selected_recommendations: list[dict[str, Any]],
+        shadow_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        response = self._call(
+            {
+                "route": "reading.recommend.agentic_shadow_v1",
+                "domain": "reading",
+                "tool_policy": "none",
+                "output_schema": AGENTIC_SHADOW_SCHEMA_VERSION,
+                "format": "json",
+                "system_prompt": (
+                    "你是读书推荐系统的 Hermes agentic shadow 评估层。只输出 JSON，不要输出 Markdown。"
+                    "这是只读 shadow route；不要修改文件、数据库、memory、消息或网络通道。"
+                    "当前 reflect-json runtime 不支持真实 delegation 时，也必须把输出标记为 simulated_trace。"
+                ),
+                "user_prompt": (
+                    "基于用户画像、推荐历史、plan、候选和 ARC 已选择结果，做一次 agentic shadow 对比评估。"
+                    "只能评估和提出替代建议，不能要求直接写库、投递、更新 memory 或覆盖 ARC 结果。"
+                    "按最多 2 个子角色思路输出结构化 trace，例如 profile_history_reviewer 和 source_quality_reviewer。"
+                    "重点比较 baseline selected_recommendations 与 shadow_recommendations：画像贴合、novelty、"
+                    "start path、source validity、history fatigue、hard exclusion 风险、成本/延迟风险。"
+                    '输出格式严格为 {"subagents_used":0,"roles":[...],"trace_mode":"simulated_trace|native_delegation",'
+                    '"baseline_assessment":{...},"shadow_recommendations":[...],"comparison":{...},'
+                    '"warnings":[],"confidence":0.0}。'
+                ),
+                "context": {
+                    "profile_context": _bounded_text(profile_context, INTENT_PROFILE_CONTEXT_MAX_CHARS),
+                    "recommendation_history_context": recommendation_history_context,
+                    "themes": themes,
+                    "recommendation_plan": recommendation_plan or {},
+                    "generated_candidates": generated_candidates[:12],
+                    "selected_recommendations": selected_recommendations[:6],
+                    "shadow_config": shadow_config,
+                    "local_session": self._local_session_context(),
+                },
+                "output_contract": {
+                    "subagents_used": "integer",
+                    "roles": ["string"],
+                    "trace_mode": "simulated_trace|native_delegation",
+                    "baseline_assessment": {
+                        "profile_fit": "number 0..1",
+                        "novelty": "number 0..1",
+                        "start_path_quality": "number 0..1",
+                        "source_validity": "number 0..1",
+                        "risks": ["string"],
+                    },
+                    "shadow_recommendations": [
+                        {
+                            "title": "string",
+                            "author": "string",
+                            "slot_type": "profile_fit|exploration",
+                            "theme": "string",
+                            "reason": "string",
+                            "source_url": "string",
+                            "replace_baseline_title": "string",
+                        }
+                    ],
+                    "comparison": {
+                        "baseline_strengths": ["string"],
+                        "shadow_strengths": ["string"],
+                        "tradeoffs": ["string"],
+                        "recommended_action": "observe_only|consider_later|needs_more_evidence",
+                    },
+                    "warnings": ["string"],
+                    "confidence": "number 0..1",
+                },
+                "constraints": _constraints(),
+            }
+        )
+        shadow = normalize_agentic_shadow(response)
+        self._remember_local_turn(
+            "reading.recommend.agentic_shadow_v1",
+            {
+                "theme_count": len(themes),
+                "generated_candidates": len(generated_candidates),
+                "selected_recommendations": len(selected_recommendations),
+            },
+            {
+                "subagents_used": shadow.get("subagents_used", 0),
+                "roles": shadow.get("roles", []),
+                "confidence": shadow.get("confidence", 0.0),
+            },
+        )
+        return shadow
+
     def _theme_intents_for_context(self, themes: list[str]) -> list[dict[str, str]]:
         by_theme = {intent.theme: intent for intent in self._last_theme_intents}
         intents = []
@@ -654,6 +759,45 @@ def normalize_recommendation_plan(raw_plan: Any) -> dict[str, Any]:
     }
 
 
+def normalize_agentic_shadow(raw_shadow: Any) -> dict[str, Any]:
+    if not isinstance(raw_shadow, dict):
+        return {
+            "schema_version": AGENTIC_SHADOW_SCHEMA_VERSION,
+            "subagents_used": 0,
+            "roles": [],
+            "trace_mode": "simulated_trace",
+            "baseline_assessment": {},
+            "shadow_recommendations": [],
+            "comparison": {},
+            "warnings": ["Hermes agentic shadow returned non-object JSON."],
+            "confidence": 0.0,
+        }
+
+    trace_mode = str(raw_shadow.get("trace_mode") or "simulated_trace").strip()
+    if trace_mode not in {"simulated_trace", "native_delegation"}:
+        trace_mode = "simulated_trace"
+    comparison = raw_shadow.get("comparison")
+    if not isinstance(comparison, dict):
+        comparison = {}
+    baseline_assessment = raw_shadow.get("baseline_assessment")
+    if not isinstance(baseline_assessment, dict):
+        baseline_assessment = {}
+    raw_recommendations = raw_shadow.get("shadow_recommendations")
+    if not isinstance(raw_recommendations, list):
+        raw_recommendations = []
+    return {
+        "schema_version": AGENTIC_SHADOW_SCHEMA_VERSION,
+        "subagents_used": min(max(_int_value(raw_shadow.get("subagents_used"), 0), 0), 8),
+        "roles": _bounded_string_list(raw_shadow.get("roles"), 8, 120),
+        "trace_mode": trace_mode,
+        "baseline_assessment": baseline_assessment,
+        "shadow_recommendations": [item for item in raw_recommendations if isinstance(item, dict)][:12],
+        "comparison": comparison,
+        "warnings": _bounded_string_list(raw_shadow.get("warnings"), 20, 500),
+        "confidence": _float_score(raw_shadow.get("confidence"), 0.0),
+    }
+
+
 def _normalize_theme_slot(raw_slot: Any, fallback: str) -> str:
     slot = str(raw_slot or "").strip().lower()
     if slot in {"profile_fit", "profile-fit", "fit", "profile"}:
@@ -736,6 +880,13 @@ def _float_score(raw: Any, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return max(0.0, min(1.0, value))
+
+
+def _int_value(raw: Any, default: int) -> int:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 def build_daily_recommendation_agent(

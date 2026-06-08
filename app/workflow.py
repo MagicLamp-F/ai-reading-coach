@@ -22,6 +22,7 @@ from app.memory import build_native_profile_seed_context
 from app.memory import load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
 from app.profile_ingest import FeedbackProfileIngestor
+from app.recommendation_agentic_shadow import RecommendationAgenticShadowService
 from app.recommendation_explainability import RecommendationCandidateExplainabilityService
 from app.recommendation_plan import RecommendationPlanService
 from app.recommendation_review import RecommendationReviewShadowService
@@ -123,6 +124,7 @@ class ReadingCoachWorkflow:
         source_aware_allow_limited_fill: bool = False,
         profile_ingestor: FeedbackProfileIngestor | None = None,
         recommend_review_shadow_enabled: bool | None = None,
+        agentic_shadow_enabled: bool | None = None,
     ):
         self.repo = repo
         self.search = search
@@ -163,6 +165,11 @@ class ReadingCoachWorkflow:
         self.recommendation_plan = RecommendationPlanService(
             repo=repo,
             library_dir=reading_pack_library_dir,
+        )
+        self.recommendation_agentic_shadow = RecommendationAgenticShadowService(
+            repo=repo,
+            library_dir=reading_pack_library_dir,
+            enabled=agentic_shadow_enabled,
         )
 
     def run_daily_recommendations(self) -> int:
@@ -255,6 +262,16 @@ class ReadingCoachWorkflow:
                 profile_context=profile_context,
                 recommendation_history_context=recommendation_history_context,
                 themes=themes,
+                generated_candidates=generated_candidates,
+                selected_recommendations=drafts,
+            )
+            self.recommendation_agentic_shadow.run(
+                run_id=run_id,
+                agent=self.daily_recommendation_agent,
+                profile_context=profile_context,
+                recommendation_history_context=recommendation_history_context,
+                themes=themes,
+                recommendation_plan=recommendation_plan,
                 generated_candidates=generated_candidates,
                 selected_recommendations=drafts,
             )

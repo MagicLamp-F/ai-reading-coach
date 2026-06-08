@@ -7,6 +7,7 @@ from app.daily_agent_adapter import (
     build_daily_recommendation_agent,
     build_effective_profile_summary,
     daily_recommendation_runtime_capabilities,
+    normalize_agentic_shadow,
     normalize_recommendation_plan,
     normalize_theme_intents,
 )
@@ -338,6 +339,92 @@ class DailyAgentAdapterTests(unittest.TestCase):
         self.assertTrue(calls[0]["constraints"]["do_not_modify_sqlite"])
         self.assertTrue(calls[0]["constraints"]["do_not_send_messages"])
         self.assertIn("shadow review", calls[0]["user_prompt"])
+
+    def test_hermes_adapter_runs_agentic_shadow_with_route_payload(self):
+        calls = []
+
+        def runner(argv, input, text, capture_output, timeout, check):
+            calls.append(json.loads(input))
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "subagents_used": 2,
+                        "roles": ["profile_history_reviewer", "source_quality_reviewer"],
+                        "trace_mode": "simulated_trace",
+                        "baseline_assessment": {
+                            "profile_fit": 0.8,
+                            "novelty": 0.6,
+                            "start_path_quality": 0.7,
+                            "source_validity": 0.9,
+                            "risks": [],
+                        },
+                        "shadow_recommendations": [
+                            {
+                                "title": "Shadow Book",
+                                "author": "Hermes",
+                                "slot_type": "profile_fit",
+                                "theme": "经典文学",
+                                "reason": "better fit",
+                                "source_url": "https://example.test/shadow",
+                                "replace_baseline_title": "Baseline Book",
+                            }
+                        ],
+                        "comparison": {
+                            "baseline_strengths": ["safe"],
+                            "shadow_strengths": ["novel"],
+                            "tradeoffs": ["needs evidence"],
+                            "recommended_action": "observe_only",
+                        },
+                        "warnings": [],
+                        "confidence": 0.65,
+                    },
+                    ensure_ascii=False,
+                ),
+                stderr="",
+            )
+
+        adapter = HermesDailyRecommendationAdapter("/tmp/hermes-route", timeout_seconds=12, runner=runner)
+
+        shadow = adapter.agentic_shadow_recommendations(
+            profile_context="profile",
+            recommendation_history_context="history",
+            themes=["经典文学", "科幻", "探索"],
+            recommendation_plan={"slots": [{"theme": "经典文学"}]},
+            generated_candidates=[{"title": "Candidate Book", "author": "Hermes"}],
+            selected_recommendations=[{"title": "Baseline Book", "author": "Hermes"}],
+            shadow_config={"max_subagents": 2, "side_effects_allowed": False},
+        )
+
+        self.assertEqual(shadow["schema_version"], "agentic_shadow_v1")
+        self.assertEqual(shadow["subagents_used"], 2)
+        self.assertEqual(calls[0]["route"], "reading.recommend.agentic_shadow_v1")
+        self.assertEqual(calls[0]["output_schema"], "agentic_shadow_v1")
+        self.assertEqual(calls[0]["context"]["recommendation_history_context"], "history")
+        self.assertEqual(calls[0]["context"]["shadow_config"]["max_subagents"], 2)
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_sqlite"])
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_files"])
+        self.assertTrue(calls[0]["constraints"]["do_not_send_messages"])
+        self.assertIn("只读 shadow route", calls[0]["system_prompt"])
+        self.assertIn("agentic shadow", calls[0]["user_prompt"])
+
+    def test_agentic_shadow_normalization_clamps_metadata(self):
+        shadow = normalize_agentic_shadow(
+            {
+                "subagents_used": 99,
+                "roles": ["r" * 200],
+                "trace_mode": "unexpected",
+                "warnings": ["w"],
+                "confidence": 2,
+            }
+        )
+
+        self.assertEqual(shadow["schema_version"], "agentic_shadow_v1")
+        self.assertEqual(shadow["subagents_used"], 8)
+        self.assertEqual(len(shadow["roles"][0]), 120)
+        self.assertEqual(shadow["trace_mode"], "simulated_trace")
+        self.assertEqual(shadow["confidence"], 1.0)
 
 
 if __name__ == "__main__":

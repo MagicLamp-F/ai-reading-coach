@@ -304,6 +304,94 @@ class PlanCapableDailyAgent:
         ]
 
 
+class AgenticShadowDailyAgent:
+    name = "agentic-shadow-daily-agent"
+
+    def __init__(self):
+        self.shadow_calls = []
+
+    def generate_themes(self, profile_context, recommendation_history_context=""):
+        return ["经典文学", "科幻经典", "探索主题"]
+
+    def generate_recommendations(
+        self,
+        profile_context,
+        themes,
+        search_results,
+        max_books=3,
+        recommendation_history_context="",
+    ):
+        return [
+            {
+                "title": f"Agentic Book {index}",
+                "author": "Hermes",
+                "source_url": f"https://example.test/agentic-book-{index}",
+                "slot_type": "profile_fit" if index < 3 else "exploration",
+                "theme": themes[min(index - 1, len(themes) - 1)],
+                "system_hypothesis": "agentic shadow test",
+                "profile_dimensions": ["reading_preference"],
+                "recommendation_reason": "reason",
+                "profile_mapping": "mapping",
+                "expected_benefit": "benefit",
+                "risk": "risk",
+                "reading_suggestion": "start here",
+            }
+            for index in range(1, max_books + 1)
+        ]
+
+    def agentic_shadow_recommendations(
+        self,
+        profile_context,
+        recommendation_history_context,
+        themes,
+        recommendation_plan,
+        generated_candidates,
+        selected_recommendations,
+        shadow_config,
+    ):
+        self.shadow_calls.append(
+            {
+                "themes": themes,
+                "recommendation_plan": recommendation_plan,
+                "generated_candidates": generated_candidates,
+                "selected_recommendations": selected_recommendations,
+                "shadow_config": shadow_config,
+            }
+        )
+        return {
+            "schema_version": "agentic_shadow_v1",
+            "subagents_used": 2,
+            "roles": ["profile_history_reviewer", "source_quality_reviewer"],
+            "trace_mode": "simulated_trace",
+            "baseline_assessment": {
+                "profile_fit": 0.8,
+                "novelty": 0.6,
+                "start_path_quality": 0.7,
+                "source_validity": 0.9,
+                "risks": [],
+            },
+            "shadow_recommendations": [
+                {
+                    "title": "Shadow Alternative",
+                    "author": "Hermes",
+                    "slot_type": "profile_fit",
+                    "theme": themes[0],
+                    "reason": "alternative to observe",
+                    "source_url": "https://example.test/shadow-alternative",
+                    "replace_baseline_title": selected_recommendations[0]["title"],
+                }
+            ],
+            "comparison": {
+                "baseline_strengths": ["stable"],
+                "shadow_strengths": ["more novel"],
+                "tradeoffs": ["needs evidence"],
+                "recommended_action": "observe_only",
+            },
+            "warnings": ["observe only"],
+            "confidence": 0.7,
+        }
+
+
 class CapturingLark:
     def __init__(self, summary_message_id=None):
         self.summary_message_id = summary_message_id
@@ -480,6 +568,61 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(payload["plan"]["slots"][0]["theme"], "计划文学")
             self.assertIsNotNone(cost)
             self.assertEqual(cost["provider"], "plan-capable-daily-agent")
+            conn.close()
+
+    def test_daily_run_writes_agentic_shadow_artifact_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            agent = AgenticShadowDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+                agentic_shadow_enabled=True,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_agentic_shadow'"
+            ).fetchone()
+            cost = conn.execute(
+                "SELECT * FROM cost_logs WHERE operation = 'reading.recommend.agentic_shadow_v1'"
+            ).fetchone()
+            recommendation_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM recommendations WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["count"]
+
+            self.assertEqual(len(agent.shadow_calls), 1)
+            self.assertEqual(recommendation_count, 3)
+            self.assertIsNotNone(artifact)
+            artifact_path = Path(artifact["path"])
+            self.assertTrue(artifact_path.exists())
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["route"], "reading.recommend.agentic_shadow_v1")
+            self.assertTrue(payload["shadow"])
+            self.assertTrue(payload["hint_only"])
+            self.assertEqual(payload["agentic_shadow"]["subagents_used"], 2)
+            self.assertEqual(payload["agentic_shadow"]["roles"][0], "profile_history_reviewer")
+            self.assertEqual(len(payload["selected_recommendations"]), 3)
+            self.assertIsNotNone(cost)
+            self.assertEqual(cost["provider"], "agentic-shadow-daily-agent")
+            cost_metadata = json.loads(cost["metadata_json"])
+            self.assertEqual(cost_metadata["subagents_used"], 2)
+            self.assertIn("latency_ms", cost_metadata)
             conn.close()
 
     def test_daily_run_sends_lark_profile_test_summary_after_three_recommendations(self):
