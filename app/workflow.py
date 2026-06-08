@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.feedback import FEEDBACK_LABELS, FEEDBACK_REASON_LABELS, FEEDBACK_TYPES, build_feedback_url, build_reading_pack_url
-from app.daily_agent_adapter import DailyRecommendationAgentAdapter
+from app.daily_agent_adapter import DailyRecommendationAgentAdapter, THEME_GENERATION_RULES
 from app.lark import LarkFeedbackLink, LarkRobotClient
 from app.llm import OpenAIChatClient
 from app.memory import DEFAULT_LONG_TERM_MEMORY_MAX_CHARS, HermesNativeProfileProvider
@@ -531,8 +531,10 @@ class ReadingCoachWorkflow:
                     "如果画像显示用户偏好经典名著、文学、科幻或高口碑作品，主题必须明显覆盖这些方向，"
                     "避免重复最近高频主题，除非推荐历史显示用户明确正反馈。"
                     "不要只生成工程技术、商业或工具书主题。"
+                    "主题必须能直接指导下游选书，不要输出过于抽象或无法映射到具体书籍的兴趣标签。"
                     "用户画像上下文按 Priority 1-5 分层；必须优先遵循 Hermes 原生 USER memory，"
                     "再参考明确反馈和 ARC reading profile；不要把单次弱信号写成长期偏好。"
+                    f"\n\n{THEME_GENERATION_RULES}\n\n"
                     '输出格式：{"themes":["主题1","主题2","主题3"]}\n\n'
                     f"用户画像上下文：\n{profile_context}\n\n"
                     f"推荐历史上下文：\n{recommendation_history_context or EMPTY_RECOMMENDATION_HISTORY_CONTEXT}"

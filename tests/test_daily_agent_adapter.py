@@ -2,7 +2,11 @@ import json
 import subprocess
 import unittest
 
-from app.daily_agent_adapter import HermesDailyRecommendationAdapter, build_daily_recommendation_agent
+from app.daily_agent_adapter import (
+    HermesDailyRecommendationAdapter,
+    build_daily_recommendation_agent,
+    build_effective_profile_summary,
+)
 
 
 class DailyAgentAdapterTests(unittest.TestCase):
@@ -25,6 +29,33 @@ class DailyAgentAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0]["output_schema"], "themes_v1")
         self.assertEqual(calls[0]["context"]["recommendation_history_context"], "history")
         self.assertTrue(calls[0]["constraints"]["do_not_send_messages"])
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_files"])
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_memories"])
+        self.assertIn("effective_profile_summary", calls[0]["context"])
+        self.assertIn("The first 2 themes must be profile_fit", calls[0]["user_prompt"])
+        self.assertIn("classic science fiction", calls[0]["user_prompt"])
+        self.assertIn("concrete enough to guide downstream book selection", calls[0]["user_prompt"])
+
+    def test_effective_profile_summary_keeps_stable_book_signals(self):
+        profile_context = "\n".join(
+            [
+                "Priority 1: Hermes native USER memory reading profile:",
+                "Hermes native USER.md [arc-reading-profile]:",
+                "[arc-reading-profile] User reading profile: 偏好经典名著、高口碑中文文学、科幻经典。",
+                "Priority 4: ARC applied reflection memory:",
+                "- 推荐书籍本身，不要技术文章",
+                "- AI Agent 商业化需要降频",
+                "Priority 5: Single-run weak signals:",
+                "- 本次搜索结果只作待验证假设",
+            ]
+        )
+
+        summary = build_effective_profile_summary(profile_context)
+
+        self.assertIn("EffectiveProfileSummary", summary)
+        self.assertIn("偏好经典名著、高口碑中文文学、科幻经典", summary)
+        self.assertIn("AI Agent 商业化需要降频", summary)
+        self.assertIn("Favor concrete book themes", summary)
 
     def test_hermes_adapter_generates_recommendations_with_route_payload(self):
         calls = []

@@ -11,6 +11,24 @@ from app.search import SearchResult
 
 logger = logging.getLogger(__name__)
 
+INTENT_PROFILE_CONTEXT_MAX_CHARS = 5000
+EFFECTIVE_PROFILE_SUMMARY_MAX_LINES = 12
+
+THEME_GENERATION_RULES = (
+    "Theme generation rules:\n"
+    "- Output exactly 3 themes.\n"
+    "- The first 2 themes must be profile_fit themes; the third must be an exploration theme.\n"
+    "- At least one theme must clearly cover classic/high-reputation literature or Chinese literary classics.\n"
+    "- At least one theme must clearly cover classic science fiction, especially civilization imagination, "
+    "technology ethics, or future society.\n"
+    "- Do not output only engineering, business, productivity, or tool-book themes.\n"
+    "- Downrank software engineering and AI Agent commercialization if they appear as recent high-frequency "
+    "themes without fresh positive feedback.\n"
+    "- Themes must be concrete enough to guide downstream book selection.\n"
+    "- Avoid semantic duplicates of recent high-frequency themes unless positive feedback exists for that exact "
+    "theme cluster."
+)
+
 
 class DailyAgentAdapterError(RuntimeError):
     pass
@@ -68,16 +86,22 @@ class HermesDailyRecommendationAdapter:
                 "tool_policy": "none",
                 "output_schema": "themes_v1",
                 "format": "json",
-                "system_prompt": "你是读书推荐系统的 Hermes 画像决策层。只输出 JSON。",
+                "system_prompt": (
+                    "你是读书推荐系统的 Hermes 画像决策层。只输出 JSON。"
+                    "这是只读决策 route；不要修改文件、数据库、memory、消息或网络通道。"
+                ),
                 "user_prompt": (
                     "根据用户画像上下文和推荐历史生成今日推荐主题。要求 2 个贴合画像主题，1 个探索型主题。"
                     "如果画像显示用户偏好经典名著、文学、科幻或高口碑作品，主题必须明显覆盖这些方向，"
                     "避免重复最近高频主题，除非推荐历史显示用户明确正反馈。"
                     "不要只生成工程技术、商业或工具书主题。"
+                    "主题必须能直接指导下游选书，不要输出过于抽象或无法映射到具体书籍的兴趣标签。"
+                    f"\n\n{THEME_GENERATION_RULES}\n\n"
                     '输出格式严格为 {"themes":["主题1","主题2","主题3"]}。'
                 ),
                 "context": {
-                    "profile_context": profile_context,
+                    "effective_profile_summary": build_effective_profile_summary(profile_context),
+                    "profile_context": _bounded_text(profile_context, INTENT_PROFILE_CONTEXT_MAX_CHARS),
                     "recommendation_history_context": recommendation_history_context,
                     "local_session": self._local_session_context(),
                 },
@@ -230,10 +254,70 @@ class HermesDailyRecommendationAdapter:
 def _constraints() -> dict[str, bool]:
     return {
         "do_not_modify_sqlite": True,
+        "do_not_modify_files": True,
+        "do_not_modify_memories": True,
         "do_not_send_messages": True,
+        "do_not_modify_network_channels": True,
         "do_not_apply_patches": True,
         "business_orchestrator_writes_outputs": True,
     }
+
+
+def build_effective_profile_summary(profile_context: str) -> str:
+    selected = []
+    for line in profile_context.splitlines():
+        stripped = " ".join(line.strip().split())
+        if not stripped:
+            continue
+        if _is_summary_signal(stripped):
+            selected.append(stripped[:220])
+        if len(selected) >= EFFECTIVE_PROFILE_SUMMARY_MAX_LINES:
+            break
+
+    if not selected:
+        selected = ["暂无高置信画像摘要；按 Priority 1-5 保守使用原始画像上下文。"]
+
+    lines = [
+        "EffectiveProfileSummary:",
+        "- Priority order: Hermes native USER memory > explicit ARC feedback > ARC inferred profile > ARC applied reflection memory > single-run weak signals.",
+        "- Stable and relevant signals:",
+        *[f"  - {line}" for line in selected],
+        "- Book-selection steering:",
+        "  - Favor concrete book themes over abstract interest labels.",
+        "  - Keep literature/classics and classic science fiction visible when supported by profile evidence.",
+        "  - Treat engineering, business, productivity, and tool-book topics as capped unless fresh positive feedback exists.",
+    ]
+    return "\n".join(lines)
+
+
+def _is_summary_signal(line: str) -> bool:
+    markers = (
+        "Hermes native USER.md",
+        "[arc-reading-profile]",
+        "Reading Preferences",
+        "Long-term Interests",
+        "Aversion Patterns",
+        "稳定",
+        "明确反馈",
+        "经典",
+        "名著",
+        "文学",
+        "科幻",
+        "高口碑",
+        "偏好",
+        "避免",
+        "降频",
+        "反感",
+        "不感兴趣",
+    )
+    return any(marker in line for marker in markers)
+
+
+def _bounded_text(text: str, max_chars: int) -> str:
+    normalized = text.strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars].rstrip() + "\n...[truncated for reading.recommend.intent]"
 
 
 def build_daily_recommendation_agent(

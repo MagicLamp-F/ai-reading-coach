@@ -587,6 +587,9 @@ class WorkflowTests(unittest.TestCase):
             workflow.run_daily_recommendations()
 
             self.assertEqual(len(llm.prompts), 2)
+            self.assertIn("Theme generation rules", llm.prompts[0][1])
+            self.assertIn("The first 2 themes must be profile_fit", llm.prompts[0][1])
+            self.assertIn("At least one theme must clearly cover classic science fiction", llm.prompts[0][1])
             for _, user_prompt in llm.prompts:
                 self.assertIn("Priority 1: Hermes native USER memory reading profile", user_prompt)
                 self.assertIn("Priority 3: ARC inferred reading profile", user_prompt)
