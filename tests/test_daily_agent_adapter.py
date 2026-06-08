@@ -187,6 +187,57 @@ class DailyAgentAdapterTests(unittest.TestCase):
         self.assertEqual(calls[1]["context"]["theme_intents"][2]["slot"], "exploration")
         self.assertEqual(calls[1]["context"]["theme_intents"][2]["reason"], "验证新方向")
 
+    def test_hermes_adapter_reviews_recommendations_with_shadow_route_payload(self):
+        calls = []
+
+        def runner(argv, input, text, capture_output, timeout, check):
+            calls.append(json.loads(input))
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "verdict": "accept",
+                        "candidate_reviews": [
+                            {
+                                "title": "Reviewed Book",
+                                "author": "Hermes",
+                                "status": "keep",
+                                "reasons": ["fits profile"],
+                                "profile_fit_score": 0.9,
+                                "fatigue_risk": "low",
+                                "start_path_quality": "good",
+                                "resource_type_risk": "none",
+                            }
+                        ],
+                        "global_warnings": [],
+                        "revision_instructions": [],
+                        "confidence": 0.8,
+                    },
+                    ensure_ascii=False,
+                ),
+                stderr="",
+            )
+
+        adapter = HermesDailyRecommendationAdapter("/tmp/hermes-route", timeout_seconds=12, runner=runner)
+
+        review = adapter.review_recommendations(
+            profile_context="profile",
+            recommendation_history_context="history",
+            themes=["经典文学", "科幻", "探索"],
+            generated_candidates=[{"title": "Reviewed Book", "author": "Hermes"}],
+            selected_recommendations=[{"title": "Reviewed Book", "author": "Hermes"}],
+        )
+
+        self.assertEqual(review["verdict"], "accept")
+        self.assertEqual(calls[0]["route"], "reading.recommend.review_v1")
+        self.assertEqual(calls[0]["output_schema"], "recommendation_review_v1")
+        self.assertEqual(calls[0]["context"]["recommendation_history_context"], "history")
+        self.assertEqual(calls[0]["context"]["generated_candidates"][0]["title"], "Reviewed Book")
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_sqlite"])
+        self.assertTrue(calls[0]["constraints"]["do_not_send_messages"])
+        self.assertIn("shadow review", calls[0]["user_prompt"])
+
 
 if __name__ == "__main__":
     unittest.main()

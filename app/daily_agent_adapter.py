@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 INTENT_PROFILE_CONTEXT_MAX_CHARS = 5000
 EFFECTIVE_PROFILE_SUMMARY_MAX_LINES = 12
 THEME_INTENT_SCHEMA_VERSION = "themes_v2"
+RECOMMENDATION_REVIEW_SCHEMA_VERSION = "recommendation_review_v1"
 
 THEME_GENERATION_RULES = (
     "Theme generation rules:\n"
@@ -64,6 +65,16 @@ class DailyRecommendationAgentAdapter(Protocol):
         max_books: int = 3,
         recommendation_history_context: str = "",
     ) -> list[dict[str, Any]]:
+        ...
+
+    def review_recommendations(
+        self,
+        profile_context: str,
+        recommendation_history_context: str,
+        themes: list[str],
+        generated_candidates: list[dict[str, Any]],
+        selected_recommendations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         ...
 
 
@@ -221,6 +232,79 @@ class HermesDailyRecommendationAdapter:
         )
         return normalized
 
+    def review_recommendations(
+        self,
+        profile_context: str,
+        recommendation_history_context: str,
+        themes: list[str],
+        generated_candidates: list[dict[str, Any]],
+        selected_recommendations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        response = self._call(
+            {
+                "route": "reading.recommend.review_v1",
+                "domain": "reading",
+                "tool_policy": "none",
+                "output_schema": RECOMMENDATION_REVIEW_SCHEMA_VERSION,
+                "format": "json",
+                "system_prompt": (
+                    "你是读书推荐系统的 Hermes 影子审查层。只输出 JSON，不要输出 Markdown。"
+                    "这是只读 shadow route；不要修改文件、数据库、memory、消息或网络通道。"
+                ),
+                "user_prompt": (
+                    "审查今日候选书和最终推荐是否符合用户画像、推荐历史和 ARC 业务约束。"
+                    "重点检查：是否是真正的书而不是文章/课程/网页；是否命中 Hard exclusions 或历史疲劳；"
+                    "是否满足 2 个 profile_fit + 1 个 exploration 的结构；是否给出可开始的阅读入口；"
+                    "是否过度推荐工程、商业、工具书或重复大部头；是否和经典文学/科幻/高口碑书籍偏好冲突。"
+                    "这是 shadow review，只能给出审查、风险和建议；不能要求直接写库、投递或更新 memory。"
+                    '输出格式严格为 {"verdict":"accept|warn|reject","candidate_reviews":[...],'
+                    '"global_warnings":[],"revision_instructions":[],"confidence":0.0}。'
+                ),
+                "context": {
+                    "profile_context": profile_context,
+                    "recommendation_history_context": recommendation_history_context,
+                    "themes": themes,
+                    "theme_intents": self._theme_intents_for_context(themes),
+                    "generated_candidates": generated_candidates[:12],
+                    "selected_recommendations": selected_recommendations[:6],
+                    "local_session": self._local_session_context(),
+                },
+                "output_contract": {
+                    "schema_version": RECOMMENDATION_REVIEW_SCHEMA_VERSION,
+                    "verdict": "accept|warn|reject",
+                    "candidate_reviews": [
+                        {
+                            "title": "string",
+                            "author": "string",
+                            "status": "keep|remove|replace|needs_check",
+                            "reasons": ["string"],
+                            "profile_fit_score": "number 0..1",
+                            "fatigue_risk": "low|medium|high",
+                            "start_path_quality": "good|weak|missing",
+                            "resource_type_risk": "none|article_like|course_like|unknown",
+                        }
+                    ],
+                    "global_warnings": ["string"],
+                    "revision_instructions": ["string"],
+                    "confidence": "number 0..1",
+                },
+                "constraints": _constraints(),
+            }
+        )
+        review = normalize_recommendation_review(response)
+        self._remember_local_turn(
+            "reading.recommend.review_v1",
+            {
+                "generated_candidates": len(generated_candidates),
+                "selected_recommendations": len(selected_recommendations),
+            },
+            {
+                "verdict": review.get("verdict", ""),
+                "candidate_review_count": len(review.get("candidate_reviews", [])),
+            },
+        )
+        return review
+
     def _theme_intents_for_context(self, themes: list[str]) -> list[dict[str, str]]:
         by_theme = {intent.theme: intent for intent in self._last_theme_intents}
         intents = []
@@ -333,6 +417,39 @@ def normalize_theme_intents(raw_themes: Any) -> list[ThemeIntent]:
     return intents
 
 
+def normalize_recommendation_review(raw_review: Any) -> dict[str, Any]:
+    if not isinstance(raw_review, dict):
+        return {
+            "schema_version": RECOMMENDATION_REVIEW_SCHEMA_VERSION,
+            "verdict": "warn",
+            "candidate_reviews": [],
+            "global_warnings": ["Hermes review returned non-object JSON."],
+            "revision_instructions": [],
+            "confidence": 0.0,
+        }
+
+    verdict = str(raw_review.get("verdict") or raw_review.get("overall_verdict") or "warn").strip().lower()
+    if verdict not in {"accept", "warn", "reject"}:
+        verdict = "warn"
+    candidate_reviews = raw_review.get("candidate_reviews", [])
+    if not isinstance(candidate_reviews, list):
+        candidate_reviews = []
+    global_warnings = raw_review.get("global_warnings", raw_review.get("warnings", []))
+    if not isinstance(global_warnings, list):
+        global_warnings = [str(global_warnings)]
+    revision_instructions = raw_review.get("revision_instructions", raw_review.get("suggested_actions", []))
+    if not isinstance(revision_instructions, list):
+        revision_instructions = [str(revision_instructions)]
+    return {
+        "schema_version": RECOMMENDATION_REVIEW_SCHEMA_VERSION,
+        "verdict": verdict,
+        "candidate_reviews": [item for item in candidate_reviews if isinstance(item, dict)][:20],
+        "global_warnings": [str(item)[:500] for item in global_warnings if str(item).strip()][:20],
+        "revision_instructions": [str(item)[:500] for item in revision_instructions if str(item).strip()][:20],
+        "confidence": _float_score(raw_review.get("confidence"), 0.0),
+    }
+
+
 def _normalize_theme_slot(raw_slot: Any, fallback: str) -> str:
     slot = str(raw_slot or "").strip().lower()
     if slot in {"profile_fit", "profile-fit", "fit", "profile"}:
@@ -397,6 +514,14 @@ def _bounded_text(text: str, max_chars: int) -> str:
     if len(normalized) <= max_chars:
         return normalized
     return normalized[:max_chars].rstrip() + "\n...[truncated for reading.recommend.intent]"
+
+
+def _float_score(raw: Any, default: float) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, value))
 
 
 def build_daily_recommendation_agent(

@@ -18,6 +18,7 @@ from app.memory import build_native_profile_seed_context
 from app.memory import load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
 from app.profile_ingest import FeedbackProfileIngestor
+from app.recommendation_review import RecommendationReviewShadowService
 from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview
 from app.repository import DeliveryOutboxDraft, RecommendationCandidateDraft, RecommendationDraft, Repository
 from app.search import SearchResult, TavilySearch
@@ -115,6 +116,7 @@ class ReadingCoachWorkflow:
         source_min_coverage_score: float = 0.5,
         source_aware_allow_limited_fill: bool = False,
         profile_ingestor: FeedbackProfileIngestor | None = None,
+        recommend_review_shadow_enabled: bool | None = None,
     ):
         self.repo = repo
         self.search = search
@@ -143,6 +145,11 @@ class ReadingCoachWorkflow:
         self.source_min_coverage_score = source_min_coverage_score
         self.source_aware_allow_limited_fill = source_aware_allow_limited_fill
         self.profile_ingestor = profile_ingestor
+        self.recommendation_review_shadow = RecommendationReviewShadowService(
+            repo=repo,
+            library_dir=reading_pack_library_dir,
+            enabled=recommend_review_shadow_enabled,
+        )
 
     def run_daily_recommendations(self) -> int:
         run_id = self.repo.create_run("daily_recommendation", {"channel": self.channel})
@@ -198,7 +205,17 @@ class ReadingCoachWorkflow:
                 recommendation_history_context,
             )
             drafts = self._filter_hard_excluded_drafts(run_id, drafts)
+            generated_candidates = list(drafts)
             drafts = self._source_aware_rank_drafts(run_id, drafts)
+            self.recommendation_review_shadow.run(
+                run_id=run_id,
+                agent=self.daily_recommendation_agent,
+                profile_context=profile_context,
+                recommendation_history_context=recommendation_history_context,
+                themes=themes,
+                generated_candidates=generated_candidates,
+                selected_recommendations=drafts,
+            )
             if self.daily_recommendation_agent is None and self.llm.api_key:
                 api_calls += 1
                 self.repo.record_cost(run_id, "model", "generate_recommendations", 1, {"model": self.llm.model})

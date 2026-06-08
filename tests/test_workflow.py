@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -144,6 +145,76 @@ class ExplodingReadingPackAgent:
 
     def generate_pack(self, prompt_context):
         raise RuntimeError("reading pack unavailable")
+
+
+class ReviewCapableDailyAgent:
+    name = "review-capable-daily-agent"
+
+    def __init__(self):
+        self.review_calls = []
+
+    def generate_themes(self, profile_context, recommendation_history_context=""):
+        return ["经典文学", "科幻经典", "探索主题"]
+
+    def generate_recommendations(
+        self,
+        profile_context,
+        themes,
+        search_results,
+        max_books=3,
+        recommendation_history_context="",
+    ):
+        return [
+            {
+                "title": f"Review Book {index}",
+                "author": "Hermes",
+                "source_url": f"https://example.test/review-book-{index}",
+                "slot_type": "profile_fit" if index < 3 else "exploration",
+                "theme": themes[min(index - 1, len(themes) - 1)],
+                "system_hypothesis": "review shadow test",
+                "profile_dimensions": ["reading_preference"],
+                "recommendation_reason": "reason",
+                "profile_mapping": "mapping",
+                "expected_benefit": "benefit",
+                "risk": "risk",
+                "reading_suggestion": "start here",
+            }
+            for index in range(1, max_books + 1)
+        ]
+
+    def review_recommendations(
+        self,
+        profile_context,
+        recommendation_history_context,
+        themes,
+        generated_candidates,
+        selected_recommendations,
+    ):
+        self.review_calls.append(
+            {
+                "themes": themes,
+                "generated_candidates": generated_candidates,
+                "selected_recommendations": selected_recommendations,
+            }
+        )
+        return {
+            "verdict": "accept",
+            "candidate_reviews": [
+                {
+                    "title": selected_recommendations[0]["title"],
+                    "author": selected_recommendations[0]["author"],
+                    "status": "keep",
+                    "reasons": ["fits profile"],
+                    "profile_fit_score": 0.9,
+                    "fatigue_risk": "low",
+                    "start_path_quality": "good",
+                    "resource_type_risk": "none",
+                }
+            ],
+            "global_warnings": [],
+            "revision_instructions": [],
+            "confidence": 0.8,
+        }
 
 
 class CapturingLark:
@@ -518,6 +589,53 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(selected_candidates), 2)
             self.assertEqual(len(rejected_candidates), 2)
             self.assertIn("selected fewer than 3", run["warning_message"])
+            conn.close()
+
+    def test_daily_run_writes_recommendation_review_shadow_artifact_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            agent = ReviewCapableDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+                recommend_review_shadow_enabled=True,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_review'"
+            ).fetchone()
+            cost = conn.execute(
+                "SELECT * FROM cost_logs WHERE operation = 'reading.recommend.review_v1'"
+            ).fetchone()
+            run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
+
+            self.assertEqual(run["status"], "success")
+            self.assertEqual(len(agent.review_calls), 1)
+            self.assertIsNotNone(artifact)
+            artifact_path = Path(artifact["path"])
+            self.assertTrue(artifact_path.exists())
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["route"], "reading.recommend.review_v1")
+            self.assertTrue(payload["shadow"])
+            self.assertEqual(payload["review"]["verdict"], "accept")
+            self.assertEqual(len(payload["selected_recommendations"]), 3)
+            self.assertIsNotNone(cost)
+            self.assertEqual(cost["provider"], "review-capable-daily-agent")
             conn.close()
 
     def test_daily_run_records_warning_when_lark_profile_test_summary_fails(self):

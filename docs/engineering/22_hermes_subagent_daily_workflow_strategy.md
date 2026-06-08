@@ -2,6 +2,10 @@
 
 更新时间：2026-06-08
 
+实现状态：
+
+- 2026-06-08：已落地 `reading.recommend.review_v1` shadow 路径。默认关闭，可通过 `ARC_ENABLE_RECOMMEND_REVIEW_SHADOW=true` 或 `ReadingCoachWorkflow(..., recommend_review_shadow_enabled=True)` 启用。输出写入 `artifacts`，artifact type 为 `recommendation_review`，本地 JSON 路径位于 `library/recommendation-reviews/YYYY/MM/`。
+
 ## 1. 核心结论
 
 不应该让 Hermes 子 agent 承接 `ai-reading-coach` 的完整 `run-daily` workflow。
@@ -314,6 +318,32 @@ recommend.generate
 
 初期可只 shadow，不改变正式投递。
 
+当前实现：
+
+```text
+app/daily_agent_adapter.py
+  -> HermesDailyRecommendationAdapter.review_recommendations()
+  -> route: reading.recommend.review_v1
+  -> output_schema: recommendation_review_v1
+
+app/recommendation_review.py
+  -> RecommendationReviewShadowService
+  -> 负责开关判断、调用 adapter、记录 cost、写 recommendation_review artifact
+
+app/workflow.py
+  -> generate candidates
+  -> hard exclusion
+  -> source-aware ranking
+  -> recommendation review shadow
+  -> recommendations / reading packs / delivery
+```
+
+失败边界：
+
+```text
+review_v1 shadow 失败只写 run warning，不影响正式 daily 推荐、入库、reading pack 或投递。
+```
+
 输出示例：
 
 ```json
@@ -474,11 +504,12 @@ ARC_ENABLE_REVIEW_GATING=false
 
 ### P1: Review Route
 
-- [ ] 定义 `recommendation_review_v1` schema。
-- [ ] 新增 Hermes daily adapter 方法 `review_recommendations()`。
-- [ ] 新增配置 `ARC_ENABLE_RECOMMEND_REVIEW_SHADOW=false`。
-- [ ] review route 失败时不影响 daily。
-- [ ] review 输出写 artifact。
+- [x] 定义 `recommendation_review_v1` schema。
+- [x] 新增 Hermes daily adapter 方法 `review_recommendations()`。
+- [x] 新增配置 `ARC_ENABLE_RECOMMEND_REVIEW_SHADOW=false`。
+- [x] review route 失败时不影响 daily。
+- [x] review 输出写 artifact。
+- [x] review route 记录 `cost_logs.operation='reading.recommend.review_v1'`。
 
 ### P1: Hard Constraint Explainability
 
@@ -655,6 +686,13 @@ hermes-agentic-json
 - `review_v1` shadow 失败不影响正式推荐。
 - review 输出可查询、可回放。
 - 候选过滤原因可审计。
+
+当前验证：
+
+```bash
+python3 -m py_compile app/daily_agent_adapter.py app/recommendation_review.py app/workflow.py
+python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q
+```
 
 第二阶段验收：
 
