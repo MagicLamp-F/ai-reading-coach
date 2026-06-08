@@ -6,6 +6,7 @@ from app.daily_agent_adapter import (
     HermesDailyRecommendationAdapter,
     build_daily_recommendation_agent,
     build_effective_profile_summary,
+    daily_recommendation_runtime_capabilities,
     normalize_theme_intents,
 )
 
@@ -13,6 +14,23 @@ from app.daily_agent_adapter import (
 class DailyAgentAdapterTests(unittest.TestCase):
     def test_build_daily_recommendation_agent_returns_none_for_custom(self):
         self.assertIsNone(build_daily_recommendation_agent("custom", "cmd", 1))
+
+    def test_hermes_adapter_reports_reflect_json_runtime_capabilities(self):
+        adapter = HermesDailyRecommendationAdapter("/tmp/hermes-route", timeout_seconds=12)
+
+        capabilities = daily_recommendation_runtime_capabilities(adapter)
+
+        self.assertEqual(capabilities["schema_version"], "daily_agent_runtime_capabilities_v1")
+        self.assertEqual(capabilities["provider"], "hermes-agent")
+        self.assertEqual(capabilities["runtime"], "reflect-json")
+        self.assertFalse(capabilities["supports_native_thread"])
+        self.assertFalse(capabilities["supports_delegation"])
+        self.assertFalse(capabilities["supports_memory"])
+        self.assertFalse(capabilities["supports_file"])
+        self.assertFalse(capabilities["supports_terminal"])
+        self.assertFalse(capabilities["supports_web"])
+        self.assertFalse(capabilities["supports_session_search"])
+        self.assertFalse(capabilities["side_effects_allowed"])
 
     def test_hermes_adapter_generates_themes_with_route_payload(self):
         calls = []

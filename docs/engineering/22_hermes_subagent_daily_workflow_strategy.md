@@ -6,6 +6,7 @@
 
 - 2026-06-08：已落地 `reading.recommend.review_v1` shadow 路径。默认关闭，可通过 `ARC_ENABLE_RECOMMEND_REVIEW_SHADOW=true` 或 `ReadingCoachWorkflow(..., recommend_review_shadow_enabled=True)` 启用。输出写入 `artifacts`，artifact type 为 `recommendation_review`，本地 JSON 路径位于 `library/recommendation-reviews/YYYY/MM/`。
 - 2026-06-08：已落地候选过滤解释 artifact。每次 `run-daily` 会写 `recommendation_candidate_explainability` artifact，记录候选书是否 selected/rejected、`excluded_by`、source-aware 分数、source status 和 reject reason。本地 JSON 路径位于 `library/recommendation-decisions/YYYY/MM/`。
+- 2026-06-08：已落地 daily agent runtime capability 建模。每次 `run-daily` 创建 `run_logs` 后立即将 `hermes_runtime_capabilities` 写入 `run_logs.metadata_json`，记录当前 provider/runtime 是否支持 native thread、delegation、memory、file、terminal、web、session_search 以及是否允许副作用。
 
 ## 1. 核心结论
 
@@ -490,10 +491,12 @@ ARC_ENABLE_REVIEW_GATING=false
 
 ### P1: Capability 建模
 
-- [ ] 为 daily adapter 增加 capability object：
+- [x] 为 daily adapter 增加 capability object：
 
 ```json
 {
+  "schema_version": "daily_agent_runtime_capabilities_v1",
+  "provider": "hermes-agent",
   "runtime": "reflect-json",
   "supports_native_thread": false,
   "supports_delegation": false,
@@ -506,7 +509,51 @@ ARC_ENABLE_REVIEW_GATING=false
 }
 ```
 
-- [ ] 将 capability 写入 run artifact 或 run metadata。
+- [x] 将 capability 写入 run metadata。
+
+当前实现：
+
+```text
+app/daily_agent_adapter.py
+  -> HermesDailyRecommendationAdapter.runtime_capabilities()
+  -> daily_recommendation_runtime_capabilities()
+  -> 对 Hermes reflect-json、legacy-local 和 custom adapter 做统一能力归一化
+
+app/repository.py
+  -> Repository.merge_run_metadata()
+  -> 使用 BEGIN IMMEDIATE 读取并合并 run_logs.metadata_json，避免覆盖既有 channel 等 run metadata
+
+app/workflow.py
+  -> ReadingCoachWorkflow.run_daily_recommendations()
+  -> create_run() 后立即写入 metadata.hermes_runtime_capabilities
+```
+
+落库示例：
+
+```json
+{
+  "channel": "lark",
+  "hermes_runtime_capabilities": {
+    "schema_version": "daily_agent_runtime_capabilities_v1",
+    "provider": "hermes-agent",
+    "runtime": "reflect-json",
+    "supports_native_thread": false,
+    "supports_delegation": false,
+    "supports_memory": false,
+    "supports_file": false,
+    "supports_terminal": false,
+    "supports_web": false,
+    "supports_session_search": false,
+    "side_effects_allowed": false
+  }
+}
+```
+
+功能佐证：
+
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_hermes_adapter_reports_reflect_json_runtime_capabilities` 验证 Hermes adapter 输出 `runtime=reflect-json`，并显式声明不支持 native thread、delegation、memory、file、terminal、web、session_search 和副作用。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_records_runtime_capabilities_in_run_metadata` 验证 daily run 会把能力对象写入 `run_logs.metadata_json.hermes_runtime_capabilities`，且不覆盖原有 `channel` metadata。
+- 验证命令：`python3 -m py_compile app/daily_agent_adapter.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ### P1: Review Route
 

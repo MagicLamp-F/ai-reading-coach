@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from app.feedback import FEEDBACK_LABELS, FEEDBACK_REASON_LABELS, FEEDBACK_TYPES, build_feedback_url, build_reading_pack_url
-from app.daily_agent_adapter import DailyRecommendationAgentAdapter, THEME_GENERATION_RULES
+from app.daily_agent_adapter import (
+    DailyRecommendationAgentAdapter,
+    THEME_GENERATION_RULES,
+    daily_recommendation_runtime_capabilities,
+)
 from app.lark import LarkFeedbackLink, LarkRobotClient
 from app.llm import OpenAIChatClient
 from app.memory import DEFAULT_LONG_TERM_MEMORY_MAX_CHARS, HermesNativeProfileProvider
@@ -158,6 +162,7 @@ class ReadingCoachWorkflow:
 
     def run_daily_recommendations(self) -> int:
         run_id = self.repo.create_run("daily_recommendation", {"channel": self.channel})
+        self._record_daily_agent_runtime_capabilities(run_id)
         self._start_daily_agent_local_session(run_id)
         api_calls = 0
         try:
@@ -285,6 +290,16 @@ class ReadingCoachWorkflow:
         closer = getattr(self.daily_recommendation_agent, "end_local_session", None)
         if callable(closer):
             closer()
+
+    def _record_daily_agent_runtime_capabilities(self, run_id: int) -> None:
+        self.repo.merge_run_metadata(
+            run_id,
+            {
+                "hermes_runtime_capabilities": daily_recommendation_runtime_capabilities(
+                    self.daily_recommendation_agent
+                )
+            },
+        )
 
     def build_weekly_report(self) -> str:
         days = 7

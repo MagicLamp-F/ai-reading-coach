@@ -16,6 +16,7 @@ INTENT_PROFILE_CONTEXT_MAX_CHARS = 5000
 EFFECTIVE_PROFILE_SUMMARY_MAX_LINES = 12
 THEME_INTENT_SCHEMA_VERSION = "themes_v2"
 RECOMMENDATION_REVIEW_SCHEMA_VERSION = "recommendation_review_v1"
+DAILY_AGENT_RUNTIME_CAPABILITY_SCHEMA_VERSION = "daily_agent_runtime_capabilities_v1"
 
 THEME_GENERATION_RULES = (
     "Theme generation rules:\n"
@@ -101,6 +102,21 @@ class HermesDailyRecommendationAdapter:
             "persistence": "bounded_to_current_arc_run",
             "hermes_internal_thread": "not_supported_by_current_reflect_json_wrapper",
             "turns": [],
+        }
+
+    def runtime_capabilities(self) -> dict[str, Any]:
+        return {
+            "schema_version": DAILY_AGENT_RUNTIME_CAPABILITY_SCHEMA_VERSION,
+            "provider": self.name,
+            "runtime": "reflect-json",
+            "supports_native_thread": False,
+            "supports_delegation": False,
+            "supports_memory": False,
+            "supports_file": False,
+            "supports_terminal": False,
+            "supports_web": False,
+            "supports_session_search": False,
+            "side_effects_allowed": False,
         }
 
     def end_local_session(self) -> None:
@@ -386,6 +402,73 @@ def _constraints() -> dict[str, bool]:
         "do_not_apply_patches": True,
         "business_orchestrator_writes_outputs": True,
     }
+
+
+def daily_recommendation_runtime_capabilities(
+    agent: DailyRecommendationAgentAdapter | None,
+) -> dict[str, Any]:
+    if agent is None:
+        return {
+            "schema_version": DAILY_AGENT_RUNTIME_CAPABILITY_SCHEMA_VERSION,
+            "provider": "legacy-local",
+            "runtime": "legacy-local",
+            "supports_native_thread": False,
+            "supports_delegation": False,
+            "supports_memory": False,
+            "supports_file": False,
+            "supports_terminal": False,
+            "supports_web": False,
+            "supports_session_search": False,
+            "side_effects_allowed": False,
+        }
+
+    provider = str(getattr(agent, "name", agent.__class__.__name__) or agent.__class__.__name__)
+    capabilities = getattr(agent, "runtime_capabilities", None)
+    if callable(capabilities):
+        try:
+            raw = capabilities()
+        except Exception:
+            logger.exception("Daily recommendation agent capability inspection failed")
+            raw = {}
+        if isinstance(raw, dict):
+            return _normalize_runtime_capabilities(raw, provider)
+
+    return {
+        "schema_version": DAILY_AGENT_RUNTIME_CAPABILITY_SCHEMA_VERSION,
+        "provider": provider,
+        "runtime": "custom-adapter",
+        "supports_native_thread": False,
+        "supports_delegation": False,
+        "supports_memory": False,
+        "supports_file": False,
+        "supports_terminal": False,
+        "supports_web": False,
+        "supports_session_search": False,
+        "side_effects_allowed": False,
+    }
+
+
+def _normalize_runtime_capabilities(raw: dict[str, Any], provider: str) -> dict[str, Any]:
+    bool_fields = (
+        "supports_native_thread",
+        "supports_delegation",
+        "supports_memory",
+        "supports_file",
+        "supports_terminal",
+        "supports_web",
+        "supports_session_search",
+        "side_effects_allowed",
+    )
+    normalized: dict[str, Any] = {
+        "schema_version": DAILY_AGENT_RUNTIME_CAPABILITY_SCHEMA_VERSION,
+        "provider": str(raw.get("provider") or provider)[:120],
+        "runtime": str(raw.get("runtime") or "custom-adapter")[:120],
+    }
+    for field in bool_fields:
+        normalized[field] = bool(raw.get(field, False))
+    if "notes" in raw:
+        normalized["notes"] = str(raw.get("notes") or "")[:500]
+    return normalized
 
 
 def normalize_theme_intents(raw_themes: Any) -> list[ThemeIntent]:

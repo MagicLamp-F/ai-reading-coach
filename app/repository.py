@@ -157,6 +157,37 @@ class Repository:
         )
         return int(cur.lastrowid)
 
+    def merge_run_metadata(self, run_id: int, metadata_patch: dict[str, Any]) -> None:
+        if not metadata_patch:
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT metadata_json FROM run_logs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise LookupError("Run log not found")
+            try:
+                existing = json.loads(str(row["metadata_json"] or "{}"))
+            except json.JSONDecodeError:
+                existing = {}
+            if not isinstance(existing, dict):
+                existing = {}
+            existing.update(metadata_patch)
+            self.conn.execute(
+                """
+                UPDATE run_logs
+                SET metadata_json = ?
+                WHERE id = ?
+                """,
+                (json.dumps(existing, ensure_ascii=False), run_id),
+            )
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+
     def finish_run(self, run_id: int, status: str, error_message: str | None = None, api_calls: int = 0) -> None:
         self.conn.execute(
             """

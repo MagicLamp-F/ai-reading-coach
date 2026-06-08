@@ -305,6 +305,39 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(recommendation_count, 3)
             conn.close()
 
+    def test_daily_run_records_runtime_capabilities_in_run_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
+            metadata = json.loads(run["metadata_json"])
+            capabilities = metadata["hermes_runtime_capabilities"]
+            self.assertEqual(metadata["channel"], "lark")
+            self.assertEqual(capabilities["schema_version"], "daily_agent_runtime_capabilities_v1")
+            self.assertEqual(capabilities["provider"], "legacy-local")
+            self.assertEqual(capabilities["runtime"], "legacy-local")
+            self.assertFalse(capabilities["supports_native_thread"])
+            self.assertFalse(capabilities["supports_delegation"])
+            self.assertFalse(capabilities["supports_file"])
+            self.assertFalse(capabilities["side_effects_allowed"])
+            conn.close()
+
     def test_daily_run_sends_lark_profile_test_summary_after_three_recommendations(self):
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "test.db")
