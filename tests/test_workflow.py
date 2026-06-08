@@ -48,6 +48,15 @@ class EmptySearch:
         return []
 
 
+class CapturingSearch:
+    def __init__(self):
+        self.queries = []
+
+    def search_books(self, query, max_results=5):
+        self.queries.append(query)
+        return []
+
+
 class NoApiLLM:
     api_key = ""
     model = "test-model"
@@ -217,6 +226,84 @@ class ReviewCapableDailyAgent:
         }
 
 
+class PlanCapableDailyAgent:
+    name = "plan-capable-daily-agent"
+
+    def __init__(self):
+        self.plan_calls = []
+        self.theme_calls = 0
+
+    def plan_recommendations(self, profile_context, recommendation_history_context=""):
+        self.plan_calls.append(
+            {
+                "profile_context": profile_context,
+                "recommendation_history_context": recommendation_history_context,
+            }
+        )
+        return {
+            "schema_version": "recommendation_plan_v1",
+            "slots": [
+                {
+                    "slot_type": "profile_fit",
+                    "theme": "计划文学",
+                    "search_queries": ["计划文学 高口碑 书籍"],
+                    "candidate_criteria": ["必须是书"],
+                    "risk_controls": ["避开已读"],
+                    "reason": "文学偏好",
+                },
+                {
+                    "slot_type": "profile_fit",
+                    "theme": "计划科幻",
+                    "search_queries": ["计划科幻 文明想象 书籍"],
+                    "candidate_criteria": ["作者明确"],
+                    "risk_controls": ["避免文章"],
+                    "reason": "科幻偏好",
+                },
+                {
+                    "slot_type": "exploration",
+                    "theme": "计划探索",
+                    "search_queries": ["计划探索 高口碑 书籍"],
+                    "candidate_criteria": ["探索但不偏离画像"],
+                    "risk_controls": ["避免营销"],
+                    "reason": "探索新方向",
+                },
+            ],
+            "global_risk_controls": ["hard exclusions are binding"],
+            "plan_summary": "use plan as hint only",
+            "confidence": 0.8,
+        }
+
+    def generate_themes(self, profile_context, recommendation_history_context=""):
+        self.theme_calls += 1
+        raise AssertionError("plan-capable workflow should use plan themes before intent fallback")
+
+    def generate_recommendations(
+        self,
+        profile_context,
+        themes,
+        search_results,
+        max_books=3,
+        recommendation_history_context="",
+    ):
+        return [
+            {
+                "title": f"Plan Book {index}",
+                "author": "Hermes",
+                "source_url": f"https://example.test/plan-book-{index}",
+                "slot_type": "profile_fit" if index < 3 else "exploration",
+                "theme": themes[min(index - 1, len(themes) - 1)],
+                "system_hypothesis": "plan route hint test",
+                "profile_dimensions": ["reading_preference"],
+                "recommendation_reason": "reason",
+                "profile_mapping": "mapping",
+                "expected_benefit": "benefit",
+                "risk": "risk",
+                "reading_suggestion": "start here",
+            }
+            for index in range(1, max_books + 1)
+        ]
+
+
 class CapturingLark:
     def __init__(self, summary_message_id=None):
         self.summary_message_id = summary_message_id
@@ -336,6 +423,63 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(capabilities["supports_delegation"])
             self.assertFalse(capabilities["supports_file"])
             self.assertFalse(capabilities["side_effects_allowed"])
+            conn.close()
+
+    def test_daily_run_uses_recommendation_plan_as_search_hint_when_agent_supports_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            search = CapturingSearch()
+            agent = PlanCapableDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=search,
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_plan'"
+            ).fetchone()
+            cost = conn.execute(
+                "SELECT * FROM cost_logs WHERE operation = 'reading.recommend.plan_v1'"
+            ).fetchone()
+            titles = [
+                row["title"]
+                for row in conn.execute(
+                    """
+                    SELECT b.title
+                    FROM recommendations r
+                    JOIN books b ON b.id = r.book_id
+                    WHERE r.run_id = ?
+                    ORDER BY r.id
+                    """,
+                    (run_id,),
+                )
+            ]
+
+            self.assertEqual(agent.theme_calls, 0)
+            self.assertEqual(search.queries[:3], ["计划文学 高口碑 书籍", "计划科幻 文明想象 书籍", "计划探索 高口碑 书籍"])
+            self.assertEqual(titles, ["Plan Book 1", "Plan Book 2", "Plan Book 3"])
+            self.assertIsNotNone(artifact)
+            payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["route"], "reading.recommend.plan_v1")
+            self.assertTrue(payload["hint_only"])
+            self.assertEqual(payload["plan"]["slots"][0]["theme"], "计划文学")
+            self.assertIsNotNone(cost)
+            self.assertEqual(cost["provider"], "plan-capable-daily-agent")
             conn.close()
 
     def test_daily_run_sends_lark_profile_test_summary_after_three_recommendations(self):

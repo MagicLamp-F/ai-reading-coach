@@ -7,6 +7,7 @@
 - 2026-06-08：已落地 `reading.recommend.review_v1` shadow 路径。默认关闭，可通过 `ARC_ENABLE_RECOMMEND_REVIEW_SHADOW=true` 或 `ReadingCoachWorkflow(..., recommend_review_shadow_enabled=True)` 启用。输出写入 `artifacts`，artifact type 为 `recommendation_review`，本地 JSON 路径位于 `library/recommendation-reviews/YYYY/MM/`。
 - 2026-06-08：已落地候选过滤解释 artifact。每次 `run-daily` 会写 `recommendation_candidate_explainability` artifact，记录候选书是否 selected/rejected、`excluded_by`、source-aware 分数、source status 和 reject reason。本地 JSON 路径位于 `library/recommendation-decisions/YYYY/MM/`。
 - 2026-06-08：已落地 daily agent runtime capability 建模。每次 `run-daily` 创建 `run_logs` 后立即将 `hermes_runtime_capabilities` 写入 `run_logs.metadata_json`，记录当前 provider/runtime 是否支持 native thread、delegation、memory、file、terminal、web、session_search 以及是否允许副作用。
+- 2026-06-08：已落地 `reading.recommend.plan_v1` hint route。Hermes adapter 支持输出 3 个推荐 slot、搜索 query、候选标准和风险控制；ARC 只把 plan 当作主题/搜索 hint，仍由 ARC 执行推荐生成、hard exclusion、source-aware ranking、落库和投递。输出写入 `recommendation_plan` artifact，本地 JSON 路径位于 `library/recommendation-plans/YYYY/MM/`。
 
 ## 1. 核心结论
 
@@ -618,10 +619,65 @@ app/workflow.py
 
 ### P2: Plan Route
 
-- [ ] 定义 `recommendation_plan_v1` schema。
-- [ ] 新增 `reading.recommend.plan_v1` 调用。
-- [ ] plan 失败 fallback 到当前 `reading.recommend.intent`。
-- [ ] plan 只作为 query/generate hint，不直接决定推荐。
+- [x] 定义 `recommendation_plan_v1` schema。
+- [x] 新增 `reading.recommend.plan_v1` 调用。
+- [x] plan 失败 fallback 到当前 `reading.recommend.intent`。
+- [x] plan 只作为 query/generate hint，不直接决定推荐。
+
+当前实现：
+
+```text
+app/daily_agent_adapter.py
+  -> HermesDailyRecommendationAdapter.plan_recommendations()
+  -> route: reading.recommend.plan_v1
+  -> output_schema: recommendation_plan_v1
+  -> normalize_recommendation_plan()
+
+app/recommendation_plan.py
+  -> RecommendationPlanService
+  -> 负责检测 agent 是否支持 plan route、失败降级、记录 cost、写 recommendation_plan artifact
+
+app/workflow.py
+  -> build RecommendationHistoryContext 后尝试 plan route
+  -> plan 有效时用 slots[].theme 作为今日主题
+  -> Tavily 搜索优先使用 slots[].search_queries[0]
+  -> plan 无效或不支持时 fallback 到原 reading.recommend.intent / default themes
+```
+
+失败边界：
+
+```text
+plan_v1 不支持、返回空 slots、返回非 JSON object 或执行异常时，只回退到当前 intent/default theme 路径；
+不会跳过 ARC hard exclusion、source-aware ranking、recommendation_candidate_explainability、review shadow、落库或投递状态机。
+```
+
+输出示例：
+
+```json
+{
+  "schema_version": "recommendation_plan_v1",
+  "slots": [
+    {
+      "slot_type": "profile_fit",
+      "theme": "经典科幻中的文明想象与技术伦理",
+      "search_queries": ["经典科幻 文明想象 技术伦理 书籍"],
+      "candidate_criteria": ["必须是书籍", "有明确作者和阅读入口"],
+      "risk_controls": ["避免已读书", "避免文章/课程页"],
+      "reason": "贴合科幻经典偏好，同时避开近期疲劳主题"
+    }
+  ],
+  "global_risk_controls": ["Hard exclusions are binding."],
+  "plan_summary": "Plan is used as ARC search/generation hint only.",
+  "confidence": 0.8
+}
+```
+
+功能佐证：
+
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_hermes_adapter_plans_recommendations_with_route_payload` 验证 Hermes payload 使用 `route=reading.recommend.plan_v1`、`output_schema=recommendation_plan_v1`，并保留 no-side-effect constraints。
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_recommendation_plan_normalization_bounds_slots` 验证 plan schema 归一化、slot 类型归一化、字段截断和 confidence clamp。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_uses_recommendation_plan_as_search_hint_when_agent_supports_it` 验证 daily run 会使用 plan 的 search query，写 `recommendation_plan` artifact，记录 `cost_logs.operation='reading.recommend.plan_v1'`，并且最终仍由 ARC 写 `recommendations`。
+- 验证命令：`python3 -m py_compile app/daily_agent_adapter.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ### P2: Shadow Mode
 

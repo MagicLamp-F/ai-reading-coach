@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 INTENT_PROFILE_CONTEXT_MAX_CHARS = 5000
 EFFECTIVE_PROFILE_SUMMARY_MAX_LINES = 12
 THEME_INTENT_SCHEMA_VERSION = "themes_v2"
+RECOMMENDATION_PLAN_SCHEMA_VERSION = "recommendation_plan_v1"
 RECOMMENDATION_REVIEW_SCHEMA_VERSION = "recommendation_review_v1"
 DAILY_AGENT_RUNTIME_CAPABILITY_SCHEMA_VERSION = "daily_agent_runtime_capabilities_v1"
 
@@ -175,6 +176,84 @@ class HermesDailyRecommendationAdapter:
             {"themes": normalized, "theme_intents": [intent.as_dict() for intent in intents]},
         )
         return normalized
+
+    def plan_recommendations(
+        self,
+        profile_context: str,
+        recommendation_history_context: str = "",
+    ) -> dict[str, Any]:
+        response = self._call(
+            {
+                "route": "reading.recommend.plan_v1",
+                "domain": "reading",
+                "tool_policy": "none",
+                "output_schema": RECOMMENDATION_PLAN_SCHEMA_VERSION,
+                "format": "json",
+                "system_prompt": (
+                    "你是读书推荐系统的 Hermes 推荐规划层。只输出 JSON。"
+                    "这是只读 planning route；不要修改文件、数据库、memory、消息或网络通道。"
+                ),
+                "user_prompt": (
+                    "根据用户画像上下文和推荐历史，为今日推荐规划 3 个 slot。"
+                    "必须保持 2 个 profile_fit + 1 个 exploration。"
+                    "每个 slot 输出 theme、search_queries、candidate_criteria、risk_controls 和 reason。"
+                    "search_queries 必须适合公开搜索具体书籍，不要只给抽象标签。"
+                    "candidate_criteria 要说明候选书需要满足什么条件；risk_controls 要说明如何避免 hard exclusions、"
+                    "history fatigue、文章/课程误判、过度工程/商业/工具书推荐。"
+                    "规划只能作为 ARC 的 hint；不要要求直接写库、投递或更新 memory。"
+                    f"\n\n{THEME_GENERATION_RULES}\n\n"
+                    '输出格式严格为 {"slots":[{"slot_type":"profile_fit","theme":"主题",'
+                    '"search_queries":["query"],"candidate_criteria":["标准"],'
+                    '"risk_controls":["控制"],"reason":"画像/历史依据"}],'
+                    '"global_risk_controls":[],"plan_summary":"string","confidence":0.0}。'
+                ),
+                "context": {
+                    "effective_profile_summary": build_effective_profile_summary(profile_context),
+                    "profile_context": _bounded_text(profile_context, INTENT_PROFILE_CONTEXT_MAX_CHARS),
+                    "recommendation_history_context": recommendation_history_context,
+                    "local_session": self._local_session_context(),
+                },
+                "output_contract": {
+                    "slots": [
+                        {
+                            "slot_type": "profile_fit|exploration",
+                            "theme": "string",
+                            "search_queries": ["string"],
+                            "candidate_criteria": ["string"],
+                            "risk_controls": ["string"],
+                            "reason": "string",
+                        }
+                    ],
+                    "global_risk_controls": ["string"],
+                    "plan_summary": "string",
+                    "confidence": "number 0..1",
+                },
+                "constraints": _constraints(),
+            }
+        )
+        plan = normalize_recommendation_plan(response)
+        slots = plan.get("slots", [])
+        intents = [
+            ThemeIntent(
+                theme=str(slot.get("theme", ""))[:80],
+                slot=_normalize_theme_slot(slot.get("slot_type"), "exploration" if index == 2 else "profile_fit"),
+                reason=str(slot.get("reason", ""))[:240] or "Derived from recommendation_plan_v1.",
+            )
+            for index, slot in enumerate(slots[:3])
+            if isinstance(slot, dict) and str(slot.get("theme", "")).strip()
+        ]
+        if intents:
+            self._last_theme_intents = intents
+        self._remember_local_turn(
+            "reading.recommend.plan_v1",
+            {"profile_context_chars": len(profile_context), "history_context_chars": len(recommendation_history_context)},
+            {
+                "themes": [intent.theme for intent in intents],
+                "slot_count": len(slots),
+                "confidence": plan.get("confidence", 0.0),
+            },
+        )
+        return plan
 
     def generate_recommendations(
         self,
@@ -533,6 +612,48 @@ def normalize_recommendation_review(raw_review: Any) -> dict[str, Any]:
     }
 
 
+def normalize_recommendation_plan(raw_plan: Any) -> dict[str, Any]:
+    if not isinstance(raw_plan, dict):
+        return {
+            "schema_version": RECOMMENDATION_PLAN_SCHEMA_VERSION,
+            "slots": [],
+            "global_risk_controls": ["Hermes plan returned non-object JSON."],
+            "plan_summary": "",
+            "confidence": 0.0,
+        }
+
+    raw_slots = raw_plan.get("slots")
+    if not isinstance(raw_slots, list):
+        raw_slots = []
+    slots = []
+    for index, raw_slot in enumerate(raw_slots):
+        if not isinstance(raw_slot, dict):
+            continue
+        fallback_slot = "exploration" if index == 2 else "profile_fit"
+        theme = str(raw_slot.get("theme") or raw_slot.get("name") or raw_slot.get("title") or "").strip()
+        if not theme:
+            continue
+        slots.append(
+            {
+                "slot_type": _normalize_theme_slot(raw_slot.get("slot_type") or raw_slot.get("slot"), fallback_slot),
+                "theme": theme[:120],
+                "search_queries": _bounded_string_list(raw_slot.get("search_queries") or raw_slot.get("queries"), 5, 160),
+                "candidate_criteria": _bounded_string_list(raw_slot.get("candidate_criteria") or raw_slot.get("criteria"), 8, 240),
+                "risk_controls": _bounded_string_list(raw_slot.get("risk_controls"), 8, 240),
+                "reason": str(raw_slot.get("reason") or raw_slot.get("rationale") or "")[:500],
+            }
+        )
+        if len(slots) >= 3:
+            break
+    return {
+        "schema_version": RECOMMENDATION_PLAN_SCHEMA_VERSION,
+        "slots": slots,
+        "global_risk_controls": _bounded_string_list(raw_plan.get("global_risk_controls"), 10, 240),
+        "plan_summary": str(raw_plan.get("plan_summary") or raw_plan.get("summary") or "")[:800],
+        "confidence": _float_score(raw_plan.get("confidence"), 0.0),
+    }
+
+
 def _normalize_theme_slot(raw_slot: Any, fallback: str) -> str:
     slot = str(raw_slot or "").strip().lower()
     if slot in {"profile_fit", "profile-fit", "fit", "profile"}:
@@ -540,6 +661,16 @@ def _normalize_theme_slot(raw_slot: Any, fallback: str) -> str:
     if slot in {"exploration", "explore", "exploratory"}:
         return "exploration"
     return fallback if fallback in {"profile_fit", "exploration"} else "profile_fit"
+
+
+def _bounded_string_list(raw: Any, limit: int, max_chars: int) -> list[str]:
+    if isinstance(raw, list):
+        values = raw
+    elif raw is None:
+        values = []
+    else:
+        values = [raw]
+    return [str(item).strip()[:max_chars] for item in values if str(item).strip()][:limit]
 
 
 def build_effective_profile_summary(profile_context: str) -> str:

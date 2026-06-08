@@ -23,6 +23,7 @@ from app.memory import load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
 from app.profile_ingest import FeedbackProfileIngestor
 from app.recommendation_explainability import RecommendationCandidateExplainabilityService
+from app.recommendation_plan import RecommendationPlanService
 from app.recommendation_review import RecommendationReviewShadowService
 from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview
 from app.repository import DeliveryOutboxDraft, RecommendationCandidateDraft, RecommendationDraft, Repository
@@ -159,6 +160,10 @@ class ReadingCoachWorkflow:
             repo=repo,
             library_dir=reading_pack_library_dir,
         )
+        self.recommendation_plan = RecommendationPlanService(
+            repo=repo,
+            library_dir=reading_pack_library_dir,
+        )
 
     def run_daily_recommendations(self) -> int:
         run_id = self.repo.create_run("daily_recommendation", {"channel": self.channel})
@@ -180,27 +185,46 @@ class ReadingCoachWorkflow:
                 long_term_memory_context=long_term_memory_context,
             )
             recommendation_history_context = build_recommendation_history_context(self.repo)
-            themes = self._generate_themes(profile_context, recommendation_history_context)
+            recommendation_plan = self.recommendation_plan.run(
+                run_id=run_id,
+                agent=self.daily_recommendation_agent,
+                profile_context=profile_context,
+                recommendation_history_context=recommendation_history_context,
+            )
+            themes = _themes_from_recommendation_plan(recommendation_plan) or self._generate_themes(
+                profile_context,
+                recommendation_history_context,
+            )
             if self.daily_recommendation_agent is None and self.llm.api_key:
                 api_calls += 1
                 self.repo.record_cost(run_id, "model", "generate_themes", 1, {"model": self.llm.model})
 
             search_results: list[SearchResult] = []
-            for theme in themes[:3]:
+            for search_plan in _search_plans_for_themes(themes, recommendation_plan):
                 if api_calls >= self.max_daily_api_calls:
                     break
                 try:
                     results = self.search.search_books(
-                        f"{theme} 经典 名著 高口碑 文学 科幻 书籍 目录 书评",
+                        search_plan["query"],
                         max_results=4,
                     )
                 except Exception:
-                    logger.exception("Search failed for theme=%s; continuing without those results", theme)
+                    logger.exception("Search failed for theme=%s; continuing without those results", search_plan["theme"])
                     continue
                 if results:
                     search_results.extend(results)
                     api_calls += 1
-                    self.repo.record_cost(run_id, "tavily", "search_books", 1, {"theme": theme})
+                    self.repo.record_cost(
+                        run_id,
+                        "tavily",
+                        "search_books",
+                        1,
+                        {
+                            "theme": search_plan["theme"],
+                            "query": search_plan["query"],
+                            "source": search_plan["source"],
+                        },
+                    )
 
             recommendation_limit = (
                 self.source_aware_candidate_count
@@ -798,6 +822,57 @@ class ReadingCoachWorkflow:
                 "candidate_reason": str(item.get("candidate_reason", item.get("recommendation_reason", "")))[:800],
             },
         )
+
+
+def _themes_from_recommendation_plan(plan: dict[str, Any] | None) -> list[str]:
+    if not isinstance(plan, dict):
+        return []
+    slots = plan.get("slots")
+    if not isinstance(slots, list):
+        return []
+    themes = []
+    for slot in slots[:3]:
+        if not isinstance(slot, dict):
+            continue
+        theme = str(slot.get("theme") or "").strip()
+        if theme:
+            themes.append(theme[:80])
+    return themes
+
+
+def _search_plans_for_themes(themes: list[str], plan: dict[str, Any] | None) -> list[dict[str, str]]:
+    plan_queries: dict[str, str] = {}
+    if isinstance(plan, dict):
+        slots = plan.get("slots")
+        if isinstance(slots, list):
+            for slot in slots:
+                if not isinstance(slot, dict):
+                    continue
+                theme = str(slot.get("theme") or "").strip()
+                queries = slot.get("search_queries")
+                if not theme or not isinstance(queries, list):
+                    continue
+                query = next((str(item).strip() for item in queries if str(item).strip()), "")
+                if query:
+                    plan_queries[theme] = query[:240]
+
+    search_plans = []
+    for theme in themes[:3]:
+        normalized_theme = str(theme).strip()[:80]
+        if not normalized_theme:
+            continue
+        query = plan_queries.get(normalized_theme)
+        if query:
+            search_plans.append({"theme": normalized_theme, "query": query, "source": "recommendation_plan_v1"})
+        else:
+            search_plans.append(
+                {
+                    "theme": normalized_theme,
+                    "query": f"{normalized_theme} 经典 名著 高口碑 文学 科幻 书籍 目录 书评",
+                    "source": "default_theme",
+                }
+            )
+    return search_plans
 
 
 def _profile_dimensions(raw: Any) -> list[str]:

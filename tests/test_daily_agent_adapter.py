@@ -7,6 +7,7 @@ from app.daily_agent_adapter import (
     build_daily_recommendation_agent,
     build_effective_profile_summary,
     daily_recommendation_runtime_capabilities,
+    normalize_recommendation_plan,
     normalize_theme_intents,
 )
 
@@ -137,6 +138,88 @@ class DailyAgentAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0]["route"], "reading.recommend.generate")
         self.assertEqual(calls[0]["output_schema"], "recommendations_v1")
         self.assertEqual(calls[0]["context"]["recommendation_history_context"], "history")
+
+    def test_hermes_adapter_plans_recommendations_with_route_payload(self):
+        calls = []
+
+        def runner(argv, input, text, capture_output, timeout, check):
+            calls.append(json.loads(input))
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "slots": [
+                            {
+                                "slot_type": "profile_fit",
+                                "theme": "经典文学",
+                                "search_queries": ["经典文学 高口碑 长篇小说 书籍"],
+                                "candidate_criteria": ["必须是书"],
+                                "risk_controls": ["避开已读"],
+                                "reason": "文学偏好",
+                            },
+                            {
+                                "slot_type": "profile_fit",
+                                "theme": "科幻经典",
+                                "search_queries": ["科幻经典 文明 技术伦理 书籍"],
+                                "candidate_criteria": ["有明确作者"],
+                                "risk_controls": ["避免文章"],
+                                "reason": "科幻偏好",
+                            },
+                            {
+                                "slot_type": "exploration",
+                                "theme": "历史叙事探索",
+                                "search_queries": ["历史叙事 非虚构 高口碑 书籍"],
+                                "candidate_criteria": ["探索但不偏离阅读偏好"],
+                                "risk_controls": ["避免营销"],
+                                "reason": "探索新方向",
+                            },
+                        ],
+                        "global_risk_controls": ["hard exclusions are binding"],
+                        "plan_summary": "summary",
+                        "confidence": 0.7,
+                    },
+                    ensure_ascii=False,
+                ),
+                stderr="",
+            )
+
+        adapter = HermesDailyRecommendationAdapter("/tmp/hermes-route", timeout_seconds=12, runner=runner)
+
+        plan = adapter.plan_recommendations("profile", "history")
+
+        self.assertEqual(plan["schema_version"], "recommendation_plan_v1")
+        self.assertEqual(plan["slots"][0]["theme"], "经典文学")
+        self.assertEqual(calls[0]["route"], "reading.recommend.plan_v1")
+        self.assertEqual(calls[0]["output_schema"], "recommendation_plan_v1")
+        self.assertEqual(calls[0]["context"]["recommendation_history_context"], "history")
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_sqlite"])
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_files"])
+        self.assertTrue(calls[0]["constraints"]["do_not_send_messages"])
+        self.assertIn("只读 planning route", calls[0]["system_prompt"])
+        self.assertIn("search_queries", calls[0]["user_prompt"])
+
+    def test_recommendation_plan_normalization_bounds_slots(self):
+        plan = normalize_recommendation_plan(
+            {
+                "slots": [
+                    {
+                        "slot": "fit",
+                        "theme": "A" * 200,
+                        "queries": ["q"],
+                        "criteria": ["c"],
+                        "risk_controls": ["r"],
+                    }
+                ],
+                "confidence": 2,
+            }
+        )
+
+        self.assertEqual(plan["schema_version"], "recommendation_plan_v1")
+        self.assertEqual(plan["slots"][0]["slot_type"], "profile_fit")
+        self.assertEqual(len(plan["slots"][0]["theme"]), 120)
+        self.assertEqual(plan["slots"][0]["search_queries"], ["q"])
+        self.assertEqual(plan["confidence"], 1.0)
 
     def test_hermes_adapter_passes_bounded_local_session_between_route_calls(self):
         calls = []
