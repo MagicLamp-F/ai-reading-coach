@@ -583,11 +583,24 @@ class WorkflowTests(unittest.TestCase):
             candidate_rows = repo.list_recommendation_candidates(run_id)
             selected_candidates = [row for row in candidate_rows if row["status"] == "selected"]
             rejected_candidates = [row for row in candidate_rows if row["status"] == "rejected"]
+            explainability_artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_candidate_explainability'"
+            ).fetchone()
             run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
 
             self.assertEqual(set(selected_titles), {"Candidate 1", "Candidate 3"})
             self.assertEqual(len(selected_candidates), 2)
             self.assertEqual(len(rejected_candidates), 2)
+            self.assertIsNotNone(explainability_artifact)
+            decision_payload = json.loads(Path(explainability_artifact["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(decision_payload["schema_version"], "recommendation_candidate_explainability_v1")
+            self.assertEqual(decision_payload["candidate_count"], 4)
+            rejected_decisions = [item for item in decision_payload["decisions"] if item["status"] == "rejected"]
+            selected_decisions = [item for item in decision_payload["decisions"] if item["status"] == "selected"]
+            self.assertEqual(len(selected_decisions), 2)
+            self.assertTrue(
+                any("source_coverage_below_threshold" in item["excluded_by"] for item in rejected_decisions)
+            )
             self.assertIn("selected fewer than 3", run["warning_message"])
             conn.close()
 

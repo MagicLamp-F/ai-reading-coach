@@ -18,6 +18,7 @@ from app.memory import build_native_profile_seed_context
 from app.memory import load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
 from app.profile_ingest import FeedbackProfileIngestor
+from app.recommendation_explainability import RecommendationCandidateExplainabilityService
 from app.recommendation_review import RecommendationReviewShadowService
 from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview
 from app.repository import DeliveryOutboxDraft, RecommendationCandidateDraft, RecommendationDraft, Repository
@@ -150,6 +151,10 @@ class ReadingCoachWorkflow:
             library_dir=reading_pack_library_dir,
             enabled=recommend_review_shadow_enabled,
         )
+        self.recommendation_candidate_explainability = RecommendationCandidateExplainabilityService(
+            repo=repo,
+            library_dir=reading_pack_library_dir,
+        )
 
     def run_daily_recommendations(self) -> int:
         run_id = self.repo.create_run("daily_recommendation", {"channel": self.channel})
@@ -204,9 +209,17 @@ class ReadingCoachWorkflow:
                 recommendation_limit,
                 recommendation_history_context,
             )
+            raw_candidates = list(drafts)
+            hard_exclusion_keys = _recommendation_hard_exclusion_keys(self.repo)
             drafts = self._filter_hard_excluded_drafts(run_id, drafts)
             generated_candidates = list(drafts)
             drafts = self._source_aware_rank_drafts(run_id, drafts)
+            self.recommendation_candidate_explainability.write_artifact(
+                run_id=run_id,
+                raw_candidates=raw_candidates,
+                selected_recommendations=drafts,
+                hard_exclusion_keys=hard_exclusion_keys,
+            )
             self.recommendation_review_shadow.run(
                 run_id=run_id,
                 agent=self.daily_recommendation_agent,

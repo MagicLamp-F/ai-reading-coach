@@ -5,6 +5,7 @@
 实现状态：
 
 - 2026-06-08：已落地 `reading.recommend.review_v1` shadow 路径。默认关闭，可通过 `ARC_ENABLE_RECOMMEND_REVIEW_SHADOW=true` 或 `ReadingCoachWorkflow(..., recommend_review_shadow_enabled=True)` 启用。输出写入 `artifacts`，artifact type 为 `recommendation_review`，本地 JSON 路径位于 `library/recommendation-reviews/YYYY/MM/`。
+- 2026-06-08：已落地候选过滤解释 artifact。每次 `run-daily` 会写 `recommendation_candidate_explainability` artifact，记录候选书是否 selected/rejected、`excluded_by`、source-aware 分数、source status 和 reject reason。本地 JSON 路径位于 `library/recommendation-decisions/YYYY/MM/`。
 
 ## 1. 核心结论
 
@@ -344,6 +345,11 @@ app/workflow.py
 review_v1 shadow 失败只写 run warning，不影响正式 daily 推荐、入库、reading pack 或投递。
 ```
 
+功能佐证：
+
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_hermes_adapter_reviews_recommendations_with_shadow_route_payload` 验证 Hermes payload 使用 `route=reading.recommend.review_v1`、`output_schema=recommendation_review_v1`，并保留 no-side-effect constraints。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_recommendation_review_shadow_artifact_when_enabled` 验证启用 shadow 后，daily run 仍成功，review 输出写入 `artifacts.artifact_type='recommendation_review'`，并记录 `cost_logs.operation='reading.recommend.review_v1'`。
+
 输出示例：
 
 ```json
@@ -513,9 +519,55 @@ ARC_ENABLE_REVIEW_GATING=false
 
 ### P1: Hard Constraint Explainability
 
-- [ ] 记录每个候选被过滤的原因。
-- [ ] 输出 `excluded_by`：hard exclusion、history fatigue、resource type、source confidence。
-- [ ] 将过滤解释写入 run artifact，方便和 agentic shadow 对比。
+- [x] 记录每个候选被过滤或选中的原因。
+- [x] 输出 `excluded_by`：hard exclusion、source confidence / source reject reason、not selected。
+- [x] 将过滤解释写入 run artifact，方便和 agentic shadow 对比。
+- [x] artifact type 为 `recommendation_candidate_explainability`，schema 为 `recommendation_candidate_explainability_v1`。
+
+当前实现：
+
+```text
+app/recommendation_explainability.py
+  -> RecommendationCandidateExplainabilityService
+  -> 输出 candidate_count / selected_count / decisions
+
+app/workflow.py
+  -> 保留 raw_candidates
+  -> 计算 hard_exclusion_keys
+  -> source-aware ranking 写 recommendation_candidates
+  -> 写 recommendation_candidate_explainability artifact
+```
+
+输出示例：
+
+```json
+{
+  "schema_version": "recommendation_candidate_explainability_v1",
+  "run_id": 123,
+  "candidate_count": 4,
+  "selected_count": 2,
+  "decisions": [
+    {
+      "title": "Candidate 2",
+      "author": "Author",
+      "status": "rejected",
+      "excluded_by": ["source_coverage_below_threshold"],
+      "source_scoring": {
+        "user_fit_score": 0.8,
+        "source_coverage_score": 0.0,
+        "final_score": 0.36,
+        "source_status": "source_missing",
+        "reject_reason": "source_coverage_below_threshold"
+      }
+    }
+  ]
+}
+```
+
+功能佐证：
+
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_source_aware_selects_only_source_qualified_candidates` 验证 source-aware 场景会写 `recommendation_candidate_explainability` artifact。
+- 同一测试断言 artifact 中 `candidate_count=4`、selected decision 为 2 条，rejected decision 包含 `source_coverage_below_threshold`。
 
 ### P2: Plan Route
 
@@ -691,6 +743,13 @@ hermes-agentic-json
 
 ```bash
 python3 -m py_compile app/daily_agent_adapter.py app/recommendation_review.py app/workflow.py
+python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q
+```
+
+新增候选解释后，验证命令更新为：
+
+```bash
+python3 -m py_compile app/daily_agent_adapter.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py
 python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q
 ```
 
