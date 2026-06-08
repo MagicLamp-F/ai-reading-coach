@@ -4,6 +4,7 @@ import json
 import logging
 import shlex
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 INTENT_PROFILE_CONTEXT_MAX_CHARS = 5000
 EFFECTIVE_PROFILE_SUMMARY_MAX_LINES = 12
+THEME_INTENT_SCHEMA_VERSION = "themes_v2"
 
 THEME_GENERATION_RULES = (
     "Theme generation rules:\n"
@@ -28,6 +30,20 @@ THEME_GENERATION_RULES = (
     "- Avoid semantic duplicates of recent high-frequency themes unless positive feedback exists for that exact "
     "theme cluster."
 )
+
+
+@dataclass(frozen=True)
+class ThemeIntent:
+    theme: str
+    slot: str
+    reason: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "theme": self.theme,
+            "slot": self.slot,
+            "reason": self.reason,
+        }
 
 
 class DailyAgentAdapterError(RuntimeError):
@@ -64,6 +80,7 @@ class HermesDailyRecommendationAdapter:
         self.timeout_seconds = timeout_seconds
         self.runner = runner
         self._local_session: dict[str, Any] | None = None
+        self._last_theme_intents: list[ThemeIntent] = []
 
     def start_local_session(self, run_id: int, purpose: str = "run_daily") -> None:
         self._local_session = {
@@ -84,7 +101,7 @@ class HermesDailyRecommendationAdapter:
                 "route": "reading.recommend.intent",
                 "domain": "reading",
                 "tool_policy": "none",
-                "output_schema": "themes_v1",
+                "output_schema": THEME_INTENT_SCHEMA_VERSION,
                 "format": "json",
                 "system_prompt": (
                     "你是读书推荐系统的 Hermes 画像决策层。只输出 JSON。"
@@ -97,7 +114,10 @@ class HermesDailyRecommendationAdapter:
                     "不要只生成工程技术、商业或工具书主题。"
                     "主题必须能直接指导下游选书，不要输出过于抽象或无法映射到具体书籍的兴趣标签。"
                     f"\n\n{THEME_GENERATION_RULES}\n\n"
-                    '输出格式严格为 {"themes":["主题1","主题2","主题3"]}。'
+                    "输出格式严格为 "
+                    '{"themes":[{"theme":"主题1","slot":"profile_fit","reason":"基于哪些画像证据"},'
+                    '{"theme":"主题2","slot":"profile_fit","reason":"基于哪些画像证据"},'
+                    '{"theme":"主题3","slot":"exploration","reason":"要验证什么新假设"}]}。'
                 ),
                 "context": {
                     "effective_profile_summary": build_effective_profile_summary(profile_context),
@@ -105,18 +125,27 @@ class HermesDailyRecommendationAdapter:
                     "recommendation_history_context": recommendation_history_context,
                     "local_session": self._local_session_context(),
                 },
-                "output_contract": {"themes": ["string"]},
+                "output_contract": {
+                    "themes": [
+                        {
+                            "theme": "string",
+                            "slot": "profile_fit|exploration",
+                            "reason": "string",
+                        }
+                    ]
+                },
                 "constraints": _constraints(),
             }
         )
-        themes = response.get("themes")
-        if not isinstance(themes, list) or not themes:
+        intents = normalize_theme_intents(response.get("themes"))
+        if not intents:
             raise DailyAgentAdapterError("Hermes returned no themes")
-        normalized = [str(theme)[:80] for theme in themes if str(theme).strip()][:3]
+        self._last_theme_intents = intents
+        normalized = [intent.theme for intent in intents]
         self._remember_local_turn(
             "reading.recommend.intent",
             {"profile_context_chars": len(profile_context), "history_context_chars": len(recommendation_history_context)},
-            {"themes": normalized},
+            {"themes": normalized, "theme_intents": [intent.as_dict() for intent in intents]},
         )
         return normalized
 
@@ -156,6 +185,7 @@ class HermesDailyRecommendationAdapter:
                     "profile_context": profile_context,
                     "recommendation_history_context": recommendation_history_context,
                     "themes": themes,
+                    "theme_intents": self._theme_intents_for_context(themes),
                     "search_results": search_context,
                     "local_session": self._local_session_context(),
                 },
@@ -190,6 +220,17 @@ class HermesDailyRecommendationAdapter:
             {"books": [{"title": str(book.get("title", ""))[:120], "author": str(book.get("author", ""))[:120]} for book in normalized]},
         )
         return normalized
+
+    def _theme_intents_for_context(self, themes: list[str]) -> list[dict[str, str]]:
+        by_theme = {intent.theme: intent for intent in self._last_theme_intents}
+        intents = []
+        for index, theme in enumerate(themes[:3]):
+            intent = by_theme.get(theme)
+            if intent is None:
+                slot = "exploration" if index == 2 else "profile_fit"
+                intent = ThemeIntent(theme=str(theme)[:80], slot=slot, reason="Inferred from theme order for backward compatibility.")
+            intents.append(intent.as_dict())
+        return intents
 
     def _call(self, payload: dict[str, Any]) -> dict[str, Any]:
         argv = shlex.split(self.command)
@@ -261,6 +302,44 @@ def _constraints() -> dict[str, bool]:
         "do_not_apply_patches": True,
         "business_orchestrator_writes_outputs": True,
     }
+
+
+def normalize_theme_intents(raw_themes: Any) -> list[ThemeIntent]:
+    if not isinstance(raw_themes, list):
+        return []
+
+    intents: list[ThemeIntent] = []
+    for index, raw in enumerate(raw_themes):
+        fallback_slot = "exploration" if index == 2 else "profile_fit"
+        if isinstance(raw, dict):
+            theme = str(raw.get("theme") or raw.get("name") or raw.get("title") or "").strip()
+            slot = _normalize_theme_slot(raw.get("slot") or raw.get("slot_type"), fallback_slot)
+            reason = str(raw.get("reason") or raw.get("rationale") or raw.get("profile_mapping") or "").strip()
+        else:
+            theme = str(raw).strip()
+            slot = fallback_slot
+            reason = "Legacy themes_v1 string; slot inferred from position."
+        if not theme:
+            continue
+        intents.append(
+            ThemeIntent(
+                theme=theme[:80],
+                slot=slot,
+                reason=reason[:240] or "No explicit reason returned.",
+            )
+        )
+        if len(intents) >= 3:
+            break
+    return intents
+
+
+def _normalize_theme_slot(raw_slot: Any, fallback: str) -> str:
+    slot = str(raw_slot or "").strip().lower()
+    if slot in {"profile_fit", "profile-fit", "fit", "profile"}:
+        return "profile_fit"
+    if slot in {"exploration", "explore", "exploratory"}:
+        return "exploration"
+    return fallback if fallback in {"profile_fit", "exploration"} else "profile_fit"
 
 
 def build_effective_profile_summary(profile_context: str) -> str:

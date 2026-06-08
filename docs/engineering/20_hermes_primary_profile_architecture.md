@@ -340,12 +340,13 @@ ARC 已经以 Hermes native profile 为主画像
 
 `reading.recommend.intent` 是只读主题决策 route，不负责画像写入、推荐落库或消息发送。2026-06-08 的加固规则如下：
 
-- 输出仍保持 `themes_v1`：`{"themes":["主题1","主题2","主题3"]}`。
+- 输出升级为 `themes_v2`：`{"themes":[{"theme":"主题1","slot":"profile_fit","reason":"..."}, ...]}`；ARC adapter 仍兼容旧 `themes_v1` 字符串列表。
 - 主题语义顺序固定：前 2 个为 `profile_fit`，第 3 个为 `exploration`。
 - 当画像证据支持时，今日主题至少覆盖 1 个文学/经典名著方向，至少覆盖 1 个科幻经典方向。
 - 工程技术、商业、效率工具书和 AI Agent 商业化不能占满今日主题；如果推荐历史显示高频疲劳且没有新正反馈，应降频。
 - 主题必须能直接指导下游选书，不能只是“人生意义”“技术与社会”这类过抽象兴趣标签。
 - Hermes payload 会先提供 `effective_profile_summary`，再提供有长度上限的原始 `profile_context`，减少重复 reflection 历史对主题选择的污染。
+- `reading.recommend.generate` 会收到 `theme_intents`，因此候选书筛选不再只依赖主题顺序推断 slot 和推荐理由。
 - 该 route 的 constraints 显式禁止修改 SQLite、文件、memory、消息、网络通道和 patches；所有副作用仍由 ARC 执行。
 
 ## 11. 最终验收标准

@@ -149,6 +149,32 @@ approved_at
 
 ### 推荐生成事件
 
+主题意图输出：
+
+```json
+{
+  "themes": [
+    {
+      "theme": "科幻经典中的文明想象、技术伦理与未来社会",
+      "slot": "profile_fit",
+      "reason": "用户画像显示对科幻经典和技术伦理议题有稳定兴趣"
+    },
+    {
+      "theme": "高口碑中文文学中的个人命运与时代观察",
+      "slot": "profile_fit",
+      "reason": "用户偏好经典名著、高口碑文学和叙事性作品"
+    },
+    {
+      "theme": "文学化科幻与反乌托邦作品中的社会制度想象",
+      "slot": "exploration",
+      "reason": "验证科幻兴趣是否可扩展到社会派和反乌托邦方向"
+    }
+  ]
+}
+```
+
+`themes_v2` 是 `reading.recommend.intent` 的当前结构。兼容层仍接受旧 `themes_v1` 字符串数组，并按顺序推断前两个 `profile_fit`、第三个 `exploration`。
+
 输入：
 
 ```text

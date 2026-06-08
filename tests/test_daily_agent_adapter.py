@@ -6,6 +6,7 @@ from app.daily_agent_adapter import (
     HermesDailyRecommendationAdapter,
     build_daily_recommendation_agent,
     build_effective_profile_summary,
+    normalize_theme_intents,
 )
 
 
@@ -18,7 +19,20 @@ class DailyAgentAdapterTests(unittest.TestCase):
 
         def runner(argv, input, text, capture_output, timeout, check):
             calls.append(json.loads(input))
-            return subprocess.CompletedProcess(argv, 0, stdout='{"themes":["A","B","C"]}', stderr="")
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "themes": [
+                            {"theme": "A", "slot": "profile_fit", "reason": "stable"},
+                            {"theme": "B", "slot": "profile_fit", "reason": "stable"},
+                            {"theme": "C", "slot": "exploration", "reason": "test"},
+                        ]
+                    }
+                ),
+                stderr="",
+            )
 
         adapter = HermesDailyRecommendationAdapter("/tmp/hermes-route", timeout_seconds=12, runner=runner)
 
@@ -26,8 +40,9 @@ class DailyAgentAdapterTests(unittest.TestCase):
 
         self.assertEqual(themes, ["A", "B", "C"])
         self.assertEqual(calls[0]["route"], "reading.recommend.intent")
-        self.assertEqual(calls[0]["output_schema"], "themes_v1")
+        self.assertEqual(calls[0]["output_schema"], "themes_v2")
         self.assertEqual(calls[0]["context"]["recommendation_history_context"], "history")
+        self.assertEqual(calls[0]["output_contract"]["themes"][0]["slot"], "profile_fit|exploration")
         self.assertTrue(calls[0]["constraints"]["do_not_send_messages"])
         self.assertTrue(calls[0]["constraints"]["do_not_modify_files"])
         self.assertTrue(calls[0]["constraints"]["do_not_modify_memories"])
@@ -35,6 +50,13 @@ class DailyAgentAdapterTests(unittest.TestCase):
         self.assertIn("The first 2 themes must be profile_fit", calls[0]["user_prompt"])
         self.assertIn("classic science fiction", calls[0]["user_prompt"])
         self.assertIn("concrete enough to guide downstream book selection", calls[0]["user_prompt"])
+        self.assertIn('"slot":"profile_fit"', calls[0]["user_prompt"])
+
+    def test_theme_intent_normalization_accepts_legacy_strings(self):
+        intents = normalize_theme_intents(["文学经典", "科幻经典", "社会派探索"])
+
+        self.assertEqual([intent.theme for intent in intents], ["文学经典", "科幻经典", "社会派探索"])
+        self.assertEqual([intent.slot for intent in intents], ["profile_fit", "profile_fit", "exploration"])
 
     def test_effective_profile_summary_keeps_stable_book_signals(self):
         profile_context = "\n".join(
@@ -105,7 +127,21 @@ class DailyAgentAdapterTests(unittest.TestCase):
             payload = json.loads(input)
             calls.append(payload)
             if payload["route"] == "reading.recommend.intent":
-                return subprocess.CompletedProcess(argv, 0, stdout='{"themes":["经典文学","科幻","探索"]}', stderr="")
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout=json.dumps(
+                        {
+                            "themes": [
+                                {"theme": "经典文学", "slot": "profile_fit", "reason": "文学偏好"},
+                                {"theme": "科幻", "slot": "profile_fit", "reason": "科幻偏好"},
+                                {"theme": "探索", "slot": "exploration", "reason": "验证新方向"},
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                    stderr="",
+                )
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -147,6 +183,9 @@ class DailyAgentAdapterTests(unittest.TestCase):
         self.assertEqual(intent_session["hermes_internal_thread"], "not_supported_by_current_reflect_json_wrapper")
         self.assertEqual(generate_session["previous_turns"][0]["route"], "reading.recommend.intent")
         self.assertEqual(generate_session["previous_turns"][0]["response_summary"]["themes"], themes)
+        self.assertEqual(calls[1]["context"]["theme_intents"][0]["slot"], "profile_fit")
+        self.assertEqual(calls[1]["context"]["theme_intents"][2]["slot"], "exploration")
+        self.assertEqual(calls[1]["context"]["theme_intents"][2]["reason"], "验证新方向")
 
 
 if __name__ == "__main__":
