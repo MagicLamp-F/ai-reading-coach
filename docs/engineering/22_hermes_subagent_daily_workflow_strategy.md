@@ -14,6 +14,7 @@
 - 2026-06-09：已落地 P3 review gating decision artifact。默认关闭，可通过 `ARC_ENABLE_REVIEW_GATING=true` 或 `ReadingCoachWorkflow(..., review_gating_enabled=True)` 启用。当前阶段只写 `recommendation_gating_decision` artifact，本地 JSON 路径位于 `library/gating-decisions/YYYY/MM/`；不会默认拦截正式推荐入库、reading pack 或投递。
 - 2026-06-09：已落地 P3 `request_regenerate_slot` observe-only 支持。Gating 会从 `recommendation_review` 的 `candidate_reviews.status=replace/remove/revise/regenerate/needs_check` 或 `revision_instructions` 提取结构化 `requested_actions`，但当前 run 不自动重生成、不改 selected recommendations。
 - 2026-06-09：已完成 P3 agentic runtime wrapper 评估。结论是短期不新增 wrapper，继续用 `reflect-json` 承载 bounded JSON routes；只有当需要真实 bounded delegation 时，才新增实验性 `hermes-agentic-json`，并保持只读、无副作用、shadow-first。
+- 2026-06-09：已落地 P3 bounded delegation policy。`agentic_shadow` 的 `shadow_config` 现在包含 `delegation_policy`，当前固定为 `mode=simulated_trace`、`bounded_delegation_allowed=false`、`read_only=true`、`side_effects_allowed=false`，并写入 artifact / cost metadata。
 
 ## 1. 核心结论
 
@@ -991,7 +992,7 @@ warn:
 ### P3: Agentic Runtime
 
 - [x] 评估是否需要新 wrapper，例如 `hermes-agentic-json`。
-- [ ] 支持 bounded delegation。
+- [x] 支持 bounded delegation policy。
 - [ ] 支持 max wall time、max subagents、max model calls、max search calls。
 - [ ] 工具权限默认只读。
 - [ ] 禁止 file/database/memory/message side effects。
@@ -1043,6 +1044,45 @@ required controls:
 - `run_logs.metadata_json.hermes_runtime_capabilities` 已在 daily run 开始时写入，可作为后续判断是否允许 agentic runtime 的事实依据。
 - 已有单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_hermes_adapter_reports_reflect_json_runtime_capabilities` 和 `tests.test_workflow.WorkflowTests.test_daily_run_records_runtime_capabilities_in_run_metadata` 证明当前 runtime capability 被正确声明和落库。
 - 回归验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_gating.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
+
+bounded delegation policy 当前实现：
+
+```text
+app/recommendation_agentic_shadow.py
+  -> shadow_config.delegation_policy
+  -> mode=simulated_trace
+  -> bounded_delegation_allowed=false
+  -> allowed_roles 受 ARC_AGENTIC_SHADOW_MAX_SUBAGENTS 限制
+  -> read_only=true
+  -> side_effects_allowed=false
+
+app/daily_agent_adapter.py
+  -> agentic_shadow prompt 明确要求遵守 context.shadow_config.delegation_policy
+  -> bounded_delegation_allowed=false 时只能模拟子角色分析，不能声称 native delegation
+```
+
+artifact / cost metadata 佐证：
+
+```json
+{
+  "shadow_config": {
+    "delegation_policy": {
+      "mode": "simulated_trace",
+      "bounded_delegation_allowed": false,
+      "read_only": true,
+      "side_effects_allowed": false
+    }
+  },
+  "cost_metadata": {
+    "delegation_mode": "simulated_trace",
+    "bounded_delegation_allowed": false
+  }
+}
+```
+
+新增测试：
+
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_agentic_shadow_artifact_when_enabled` 现在额外验证 `shadow_config.delegation_policy` 会传给 agent、写入 artifact，并把 `delegation_mode=simulated_trace`、`bounded_delegation_allowed=false` 写入 `cost_logs.metadata_json`。
 
 ## 9. 风险矩阵
 

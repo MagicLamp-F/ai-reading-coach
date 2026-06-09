@@ -688,6 +688,11 @@ class WorkflowTests(unittest.TestCase):
             ).fetchone()["count"]
 
             self.assertEqual(len(agent.shadow_calls), 1)
+            delegation_policy = agent.shadow_calls[0]["shadow_config"]["delegation_policy"]
+            self.assertEqual(delegation_policy["mode"], "simulated_trace")
+            self.assertFalse(delegation_policy["bounded_delegation_allowed"])
+            self.assertTrue(delegation_policy["read_only"])
+            self.assertEqual(delegation_policy["allowed_roles"][:2], ["profile_history_reviewer", "source_quality_reviewer"])
             self.assertEqual(recommendation_count, 3)
             self.assertIsNotNone(artifact)
             artifact_path = Path(artifact["path"])
@@ -696,6 +701,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(payload["route"], "reading.recommend.agentic_shadow_v1")
             self.assertTrue(payload["shadow"])
             self.assertTrue(payload["hint_only"])
+            self.assertEqual(payload["shadow_config"]["delegation_policy"], delegation_policy)
             self.assertEqual(payload["agentic_shadow"]["subagents_used"], 2)
             self.assertEqual(payload["agentic_shadow"]["roles"][0], "profile_history_reviewer")
             self.assertEqual(len(payload["selected_recommendations"]), 3)
@@ -703,6 +709,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(cost["provider"], "agentic-shadow-daily-agent")
             cost_metadata = json.loads(cost["metadata_json"])
             self.assertEqual(cost_metadata["subagents_used"], 2)
+            self.assertEqual(cost_metadata["delegation_mode"], "simulated_trace")
+            self.assertFalse(cost_metadata["bounded_delegation_allowed"])
             self.assertIn("latency_ms", cost_metadata)
             self.assertIsNotNone(comparison_artifact)
             comparison_payload = json.loads(Path(comparison_artifact["path"]).read_text(encoding="utf-8"))

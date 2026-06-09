@@ -28,8 +28,9 @@ class RecommendationAgenticShadowService:
         self.repo = repo
         self.library_dir = library_dir
         self.enabled = _env_bool("ARC_ENABLE_AGENTIC_SHADOW", False) if enabled is None else enabled
+        max_subagents = _env_int("ARC_AGENTIC_SHADOW_MAX_SUBAGENTS", 2, 0, 8)
         self.shadow_config = {
-            "max_subagents": _env_int("ARC_AGENTIC_SHADOW_MAX_SUBAGENTS", 2, 0, 8),
+            "max_subagents": max_subagents,
             "timeout_seconds": _env_int("ARC_AGENTIC_SHADOW_TIMEOUT_SECONDS", 90, 1, 600),
             "allow_web_search": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_WEB_SEARCH", False),
             "allow_memory": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_MEMORY", False),
@@ -37,6 +38,7 @@ class RecommendationAgenticShadowService:
             "allow_terminal": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_TERMINAL", False),
             "allow_session_search": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_SESSION_SEARCH", False),
             "side_effects_allowed": False,
+            "delegation_policy": _delegation_policy(max_subagents),
         }
 
     def run(
@@ -96,6 +98,8 @@ class RecommendationAgenticShadowService:
             "latency_ms": latency_ms,
             "warning_count": len(shadow.get("warnings", [])) if isinstance(shadow.get("warnings"), list) else 0,
             "trace_mode": str(shadow.get("trace_mode") or ""),
+            "delegation_mode": self.shadow_config["delegation_policy"]["mode"],
+            "bounded_delegation_allowed": self.shadow_config["delegation_policy"]["bounded_delegation_allowed"],
         }
         self.repo.record_cost(run_id, provider, AGENTIC_SHADOW_ROUTE, 1, metadata)
         shadow_artifact_id = self._write_artifact(
@@ -168,6 +172,8 @@ class RecommendationAgenticShadowService:
                 "subagents_used": _int_value(shadow.get("subagents_used"), 0),
                 "trace_mode": str(shadow.get("trace_mode") or ""),
                 "latency_ms": latency_ms,
+                "delegation_mode": self.shadow_config["delegation_policy"]["mode"],
+                "bounded_delegation_allowed": self.shadow_config["delegation_policy"]["bounded_delegation_allowed"],
             },
         )
 
@@ -292,6 +298,7 @@ def _build_shadow_comparison(
             "subagents_used": _int_value(shadow.get("subagents_used"), 0),
             "roles": _string_list(shadow.get("roles"), 8, 120),
             "trace_mode": str(shadow.get("trace_mode") or ""),
+            "delegation_mode": "simulated_trace",
             "warnings": _string_list(shadow.get("warnings"), 20, 500),
             "confidence": _float_value(shadow.get("confidence"), 0.0),
         },
@@ -322,6 +329,24 @@ def _agent_recommended_action(shadow: dict[str, Any]) -> str:
     if not isinstance(comparison, dict):
         return ""
     return str(comparison.get("recommended_action") or "")[:120]
+
+
+def _delegation_policy(max_subagents: int) -> dict[str, Any]:
+    allowed_roles = [
+        "profile_history_reviewer",
+        "source_quality_reviewer",
+        "reading_pack_reviewer",
+        "hard_exclusion_reviewer",
+    ]
+    return {
+        "mode": "simulated_trace",
+        "bounded_delegation_allowed": False,
+        "max_subagents": max_subagents,
+        "allowed_roles": allowed_roles[:max_subagents],
+        "read_only": True,
+        "side_effects_allowed": False,
+        "requires_agentic_wrapper": "hermes-agentic-json",
+    }
 
 
 def _string_list(raw: Any, limit: int, max_chars: int) -> list[str]:
