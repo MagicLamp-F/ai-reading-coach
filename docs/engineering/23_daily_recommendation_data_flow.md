@@ -449,6 +449,18 @@ repo.add_recommendation()
 -> set message_id if send success
 ```
 
+飞书卡片投递时，reading pack 只作为入口出现：
+
+```text
+reading_pack_url present
+-> card shows "快读包" + "打开完整快读包" URL
+
+reading_pack_url missing
+-> card shows "快读包已生成，当前没有可打开链接。"
+```
+
+卡片不再内联 reading pack 的 summary、论证脉络、核心概念、章节 walkthrough、例子、局限或机器归档路径。原因是 reading pack 正文较长，内联到飞书推荐卡片会挤占主推荐信息；完整内容以 reading pack URL 为准。
+
 正式写入：
 
 - `recommendations`
