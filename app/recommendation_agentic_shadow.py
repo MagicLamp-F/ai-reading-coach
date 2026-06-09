@@ -32,23 +32,37 @@ class RecommendationAgenticShadowService:
         max_wall_time_seconds = _env_int("ARC_AGENTIC_SHADOW_TIMEOUT_SECONDS", 90, 1, 600)
         max_model_calls = _env_int("ARC_AGENTIC_SHADOW_MAX_MODEL_CALLS", 1, 0, 20)
         max_search_calls = _env_int("ARC_AGENTIC_SHADOW_MAX_SEARCH_CALLS", 0, 0, 50)
+        allow_web_search = _env_bool("ARC_AGENTIC_SHADOW_ALLOW_WEB_SEARCH", False)
+        allow_memory = _env_bool("ARC_AGENTIC_SHADOW_ALLOW_MEMORY", False)
+        allow_file = _env_bool("ARC_AGENTIC_SHADOW_ALLOW_FILE", False)
+        allow_terminal = _env_bool("ARC_AGENTIC_SHADOW_ALLOW_TERMINAL", False)
+        allow_session_search = _env_bool("ARC_AGENTIC_SHADOW_ALLOW_SESSION_SEARCH", False)
+        tool_permissions = _tool_permissions(
+            allow_web_search=allow_web_search,
+            allow_memory=allow_memory,
+            allow_file=allow_file,
+            allow_terminal=allow_terminal,
+            allow_session_search=allow_session_search,
+        )
         self.shadow_config = {
             "max_subagents": max_subagents,
             "timeout_seconds": max_wall_time_seconds,
             "max_wall_time_seconds": max_wall_time_seconds,
             "max_model_calls": max_model_calls,
             "max_search_calls": max_search_calls,
-            "allow_web_search": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_WEB_SEARCH", False),
-            "allow_memory": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_MEMORY", False),
-            "allow_file": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_FILE", False),
-            "allow_terminal": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_TERMINAL", False),
-            "allow_session_search": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_SESSION_SEARCH", False),
+            "allow_web_search": allow_web_search,
+            "allow_memory": allow_memory,
+            "allow_file": allow_file,
+            "allow_terminal": allow_terminal,
+            "allow_session_search": allow_session_search,
             "side_effects_allowed": False,
+            "tool_permissions": tool_permissions,
             "delegation_policy": _delegation_policy(
                 max_subagents=max_subagents,
                 max_wall_time_seconds=max_wall_time_seconds,
                 max_model_calls=max_model_calls,
                 max_search_calls=max_search_calls,
+                tool_permissions=tool_permissions,
             ),
         }
 
@@ -114,6 +128,8 @@ class RecommendationAgenticShadowService:
             "max_wall_time_seconds": self.shadow_config["max_wall_time_seconds"],
             "max_model_calls": self.shadow_config["max_model_calls"],
             "max_search_calls": self.shadow_config["max_search_calls"],
+            "tool_permission_default": self.shadow_config["tool_permissions"]["default"],
+            "side_effects_allowed": self.shadow_config["side_effects_allowed"],
         }
         self.repo.record_cost(run_id, provider, AGENTIC_SHADOW_ROUTE, 1, metadata)
         shadow_artifact_id = self._write_artifact(
@@ -191,6 +207,8 @@ class RecommendationAgenticShadowService:
                 "max_wall_time_seconds": self.shadow_config["max_wall_time_seconds"],
                 "max_model_calls": self.shadow_config["max_model_calls"],
                 "max_search_calls": self.shadow_config["max_search_calls"],
+                "tool_permission_default": self.shadow_config["tool_permissions"]["default"],
+                "side_effects_allowed": self.shadow_config["side_effects_allowed"],
             },
         )
 
@@ -353,6 +371,7 @@ def _delegation_policy(
     max_wall_time_seconds: int,
     max_model_calls: int,
     max_search_calls: int,
+    tool_permissions: dict[str, Any],
 ) -> dict[str, Any]:
     allowed_roles = [
         "profile_history_reviewer",
@@ -370,7 +389,37 @@ def _delegation_policy(
         "allowed_roles": allowed_roles[:max_subagents],
         "read_only": True,
         "side_effects_allowed": False,
+        "tool_permissions": tool_permissions,
         "requires_agentic_wrapper": "hermes-agentic-json",
+    }
+
+
+def _tool_permissions(
+    allow_web_search: bool,
+    allow_memory: bool,
+    allow_file: bool,
+    allow_terminal: bool,
+    allow_session_search: bool,
+) -> dict[str, Any]:
+    return {
+        "default": "read_only",
+        "allow_web_search": allow_web_search,
+        "allow_memory_read": allow_memory,
+        "allow_file_read": allow_file,
+        "allow_terminal": allow_terminal,
+        "allow_session_search": allow_session_search,
+        "allow_file_write": False,
+        "allow_database_write": False,
+        "allow_memory_write": False,
+        "allow_message_send": False,
+        "allow_delivery_state_change": False,
+        "forbidden_side_effects": [
+            "file_write",
+            "database_write",
+            "memory_write",
+            "message_send",
+            "delivery_state_change",
+        ],
     }
 
 

@@ -440,6 +440,7 @@ class HermesDailyRecommendationAdapter:
                     "只能评估和提出替代建议，不能要求直接写库、投递、更新 memory 或覆盖 ARC 结果。"
                     "必须遵守 context.shadow_config.delegation_policy；如果 bounded_delegation_allowed=false，"
                     "只能模拟子角色分析，不能声称已执行 native delegation。"
+                    "必须遵守 context.shadow_config.tool_permissions；禁止文件写入、数据库写入、memory 写入、消息发送或 delivery 状态修改。"
                     "必须把 max_wall_time_seconds、max_model_calls、max_search_calls 视为硬预算上限。"
                     "按最多 2 个子角色思路输出结构化 trace，例如 profile_history_reviewer 和 source_quality_reviewer。"
                     "重点比较 baseline selected_recommendations 与 shadow_recommendations：画像贴合、novelty、"

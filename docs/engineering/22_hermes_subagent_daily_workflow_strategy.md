@@ -16,6 +16,7 @@
 - 2026-06-09：已完成 P3 agentic runtime wrapper 评估。结论是短期不新增 wrapper，继续用 `reflect-json` 承载 bounded JSON routes；只有当需要真实 bounded delegation 时，才新增实验性 `hermes-agentic-json`，并保持只读、无副作用、shadow-first。
 - 2026-06-09：已落地 P3 bounded delegation policy。`agentic_shadow` 的 `shadow_config` 现在包含 `delegation_policy`，当前固定为 `mode=simulated_trace`、`bounded_delegation_allowed=false`、`read_only=true`、`side_effects_allowed=false`，并写入 artifact / cost metadata。
 - 2026-06-09：已落地 P3 agentic shadow budget policy。`shadow_config`、`delegation_policy` 和 `cost_logs.metadata_json` 会记录 `max_wall_time_seconds`、`max_model_calls`、`max_search_calls`，作为未来 `hermes-agentic-json` 的硬预算契约。
+- 2026-06-09：已落地 P3 agentic shadow tool permission policy。`shadow_config.tool_permissions` 默认 `read_only`，显式禁止 file/database/memory/message/delivery 副作用，并写入 agentic shadow artifact 与 cost metadata。
 
 ## 1. 核心结论
 
@@ -995,8 +996,8 @@ warn:
 - [x] 评估是否需要新 wrapper，例如 `hermes-agentic-json`。
 - [x] 支持 bounded delegation policy。
 - [x] 支持 max wall time、max subagents、max model calls、max search calls。
-- [ ] 工具权限默认只读。
-- [ ] 禁止 file/database/memory/message side effects。
+- [x] 工具权限默认只读。
+- [x] 禁止 file/database/memory/message side effects。
 
 评估结论：
 
@@ -1057,10 +1058,13 @@ app/recommendation_agentic_shadow.py
   -> allowed_roles 受 ARC_AGENTIC_SHADOW_MAX_SUBAGENTS 限制
   -> read_only=true
   -> side_effects_allowed=false
+  -> shadow_config.tool_permissions.default=read_only
+  -> 禁止 file/database/memory/message/delivery 写副作用
 
 app/daily_agent_adapter.py
   -> agentic_shadow prompt 明确要求遵守 context.shadow_config.delegation_policy
   -> bounded_delegation_allowed=false 时只能模拟子角色分析，不能声称 native delegation
+  -> prompt 明确要求遵守 context.shadow_config.tool_permissions
   -> max_wall_time_seconds / max_model_calls / max_search_calls 被声明为硬预算上限
 ```
 
@@ -1076,7 +1080,15 @@ artifact / cost metadata 佐证：
       "max_model_calls": 1,
       "max_search_calls": 0,
       "read_only": true,
-      "side_effects_allowed": false
+      "side_effects_allowed": false,
+      "tool_permissions": {
+        "default": "read_only",
+        "allow_file_write": false,
+        "allow_database_write": false,
+        "allow_memory_write": false,
+        "allow_message_send": false,
+        "allow_delivery_state_change": false
+      }
     }
   },
   "cost_metadata": {
@@ -1084,7 +1096,9 @@ artifact / cost metadata 佐证：
     "bounded_delegation_allowed": false,
     "max_wall_time_seconds": 90,
     "max_model_calls": 1,
-    "max_search_calls": 0
+    "max_search_calls": 0,
+    "tool_permission_default": "read_only",
+    "side_effects_allowed": false
   }
 }
 ```
@@ -1100,7 +1114,7 @@ ARC_AGENTIC_SHADOW_MAX_SEARCH_CALLS=0
 
 新增测试：
 
-- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_agentic_shadow_artifact_when_enabled` 现在额外验证 `shadow_config.delegation_policy` 会传给 agent、写入 artifact，并把 `delegation_mode=simulated_trace`、`bounded_delegation_allowed=false`、`max_wall_time_seconds`、`max_model_calls`、`max_search_calls` 写入 `cost_logs.metadata_json`。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_agentic_shadow_artifact_when_enabled` 现在额外验证 `shadow_config.delegation_policy` / `shadow_config.tool_permissions` 会传给 agent、写入 artifact，并把 `delegation_mode=simulated_trace`、`bounded_delegation_allowed=false`、`max_wall_time_seconds`、`max_model_calls`、`max_search_calls`、`tool_permission_default=read_only`、`side_effects_allowed=false` 写入 `cost_logs.metadata_json`。
 
 ## 9. 风险矩阵
 

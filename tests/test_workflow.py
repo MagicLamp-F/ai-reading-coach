@@ -690,9 +690,16 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(agent.shadow_calls), 1)
             shadow_config = agent.shadow_calls[0]["shadow_config"]
             delegation_policy = shadow_config["delegation_policy"]
+            tool_permissions = shadow_config["tool_permissions"]
             self.assertEqual(delegation_policy["mode"], "simulated_trace")
             self.assertFalse(delegation_policy["bounded_delegation_allowed"])
             self.assertTrue(delegation_policy["read_only"])
+            self.assertEqual(delegation_policy["tool_permissions"], tool_permissions)
+            self.assertEqual(tool_permissions["default"], "read_only")
+            self.assertFalse(tool_permissions["allow_file_write"])
+            self.assertFalse(tool_permissions["allow_database_write"])
+            self.assertFalse(tool_permissions["allow_memory_write"])
+            self.assertFalse(tool_permissions["allow_message_send"])
             self.assertEqual(delegation_policy["max_wall_time_seconds"], shadow_config["max_wall_time_seconds"])
             self.assertEqual(delegation_policy["max_model_calls"], shadow_config["max_model_calls"])
             self.assertEqual(delegation_policy["max_search_calls"], shadow_config["max_search_calls"])
@@ -706,6 +713,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(payload["shadow"])
             self.assertTrue(payload["hint_only"])
             self.assertEqual(payload["shadow_config"]["delegation_policy"], delegation_policy)
+            self.assertEqual(payload["shadow_config"]["tool_permissions"], tool_permissions)
             self.assertEqual(payload["agentic_shadow"]["subagents_used"], 2)
             self.assertEqual(payload["agentic_shadow"]["roles"][0], "profile_history_reviewer")
             self.assertEqual(len(payload["selected_recommendations"]), 3)
@@ -718,6 +726,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(cost_metadata["max_wall_time_seconds"], shadow_config["max_wall_time_seconds"])
             self.assertEqual(cost_metadata["max_model_calls"], shadow_config["max_model_calls"])
             self.assertEqual(cost_metadata["max_search_calls"], shadow_config["max_search_calls"])
+            self.assertEqual(cost_metadata["tool_permission_default"], "read_only")
+            self.assertFalse(cost_metadata["side_effects_allowed"])
             self.assertIn("latency_ms", cost_metadata)
             self.assertIsNotNone(comparison_artifact)
             comparison_payload = json.loads(Path(comparison_artifact["path"]).read_text(encoding="utf-8"))
