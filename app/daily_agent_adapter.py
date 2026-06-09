@@ -94,6 +94,13 @@ class DailyRecommendationAgentAdapter(Protocol):
 
 
 class HermesDailyRecommendationAdapter:
+    """Reflect-json adapter for bounded one-shot Hermes JSON routes.
+
+    The local session carried in route payloads is ARC-managed explicit context.
+    It is not a Hermes native thread and must not be treated as durable Hermes
+    session state.
+    """
+
     name = "hermes-agent"
 
     def __init__(
@@ -562,7 +569,8 @@ class HermesDailyRecommendationAdapter:
             "scope": self._local_session["scope"],
             "persistence": self._local_session["persistence"],
             "hermes_internal_thread": self._local_session["hermes_internal_thread"],
-            "previous_turns": list(self._local_session.get("turns", []))[-4:],
+            "context_type": "arc_explicit_payload_context",
+            "explicit_payload_context_turns": list(self._local_session.get("turns", []))[-4:],
         }
 
     def _remember_local_turn(self, route: str, request_summary: dict[str, Any], response_summary: dict[str, Any]) -> None:

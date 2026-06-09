@@ -17,6 +17,7 @@
 - 2026-06-09：已落地 P3 bounded delegation policy。`agentic_shadow` 的 `shadow_config` 现在包含 `delegation_policy`，当前固定为 `mode=simulated_trace`、`bounded_delegation_allowed=false`、`read_only=true`、`side_effects_allowed=false`，并写入 artifact / cost metadata。
 - 2026-06-09：已落地 P3 agentic shadow budget policy。`shadow_config`、`delegation_policy` 和 `cost_logs.metadata_json` 会记录 `max_wall_time_seconds`、`max_model_calls`、`max_search_calls`，作为未来 `hermes-agentic-json` 的硬预算契约。
 - 2026-06-09：已落地 P3 agentic shadow tool permission policy。`shadow_config.tool_permissions` 默认 `read_only`，显式禁止 file/database/memory/message/delivery 副作用，并写入 agentic shadow artifact 与 cost metadata。
+- 2026-06-09：已完成 P0 边界命名修正。Adapter 文档明确 `reflect-json` 是 bounded one-shot JSON route，payload 中的本地链路字段从 `previous_turns` 改为 `explicit_payload_context_turns`，避免误解为 Hermes native session/thread。
 
 ## 1. 核心结论
 
@@ -124,7 +125,7 @@ session_search
 hermes_internal_thread = not_supported_by_current_reflect_json_wrapper
 ```
 
-所以当前 `run-daily` 不是 Hermes native thread，也不是 Hermes 主 agent 编排子 agent。ARC 的 `local_session.previous_turns` 只是显式塞进下一次 payload 的局部上下文，不是 Hermes 原生多轮会话。
+所以当前 `run-daily` 不是 Hermes native thread，也不是 Hermes 主 agent 编排子 agent。ARC 的 `local_session.explicit_payload_context_turns` 只是显式塞进下一次 payload 的局部上下文，不是 Hermes 原生多轮会话。
 
 因此，直接让 Hermes 子 agent 承接完整 daily workflow 不是小改 adapter，而是引入新的 agent execution runtime。
 
@@ -495,9 +496,27 @@ ARC_ENABLE_REVIEW_GATING=false
 
 ### P0: 文档和边界
 
-- [ ] 新增/更新 Hermes 与 ARC 边界说明，明确 ARC owns SQLite、delivery、run state、memory application。
-- [ ] 在 adapter 文档中明确 `reflect-json` 是 oneshot，不是 Hermes native thread。
-- [ ] 把 `local_session.previous_turns` 命名为 explicit payload context，避免误解为 Hermes session。
+- [x] 新增/更新 Hermes 与 ARC 边界说明，明确 ARC owns SQLite、delivery、run state、memory application。
+- [x] 在 adapter 文档中明确 `reflect-json` 是 oneshot，不是 Hermes native thread。
+- [x] 把 `local_session.previous_turns` 命名为 explicit payload context，避免误解为 Hermes session。
+
+当前实现：
+
+```text
+app/daily_agent_adapter.py
+  -> HermesDailyRecommendationAdapter docstring 说明 reflect-json 是 bounded one-shot JSON route
+  -> local_session.context_type=arc_explicit_payload_context
+  -> local_session.explicit_payload_context_turns 代替 previous_turns
+
+docs/engineering/22_hermes_subagent_daily_workflow_strategy.md
+  -> 第 1-6 节明确 ARC owns SQLite / artifact / memory application / delivery / run state
+  -> 第 3 节明确 reflect-json 是 hermes --oneshot，不是 native thread
+```
+
+功能佐证：
+
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_hermes_adapter_carries_run_local_session_context_between_routes` 验证 payload 使用 `context_type=arc_explicit_payload_context` 和 `explicit_payload_context_turns`，且不再输出 `previous_turns`。
+- 验证命令：`python3 -m py_compile app/daily_agent_adapter.py && python3 -m unittest tests.test_daily_agent_adapter -q`。
 
 ### P1: Capability 建模
 
