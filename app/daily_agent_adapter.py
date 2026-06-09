@@ -16,6 +16,7 @@ INTENT_PROFILE_CONTEXT_MAX_CHARS = 5000
 EFFECTIVE_PROFILE_SUMMARY_MAX_LINES = 12
 THEME_INTENT_SCHEMA_VERSION = "themes_v2"
 RECOMMENDATION_PLAN_SCHEMA_VERSION = "recommendation_plan_v1"
+RECOMMENDATION_CANDIDATE_RESEARCH_SCHEMA_VERSION = "candidate_research_v1"
 RECOMMENDATION_REVIEW_SCHEMA_VERSION = "recommendation_review_v1"
 AGENTIC_SHADOW_SCHEMA_VERSION = "agentic_shadow_v1"
 DAILY_AGENT_RUNTIME_CAPABILITY_SCHEMA_VERSION = "daily_agent_runtime_capabilities_v1"
@@ -77,6 +78,16 @@ class DailyRecommendationAgentAdapter(Protocol):
         themes: list[str],
         generated_candidates: list[dict[str, Any]],
         selected_recommendations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ...
+
+    def research_candidates(
+        self,
+        profile_context: str,
+        recommendation_history_context: str,
+        themes: list[str],
+        recommendation_plan: dict[str, Any] | None,
+        search_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
         ...
 
@@ -274,6 +285,87 @@ class HermesDailyRecommendationAdapter:
             },
         )
         return plan
+
+    def research_candidates(
+        self,
+        profile_context: str,
+        recommendation_history_context: str,
+        themes: list[str],
+        recommendation_plan: dict[str, Any] | None,
+        search_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        response = self._call(
+            {
+                "route": "reading.recommend.candidate_research_v1",
+                "domain": "reading",
+                "tool_policy": "none",
+                "output_schema": RECOMMENDATION_CANDIDATE_RESEARCH_SCHEMA_VERSION,
+                "format": "json",
+                "system_prompt": (
+                    "你是读书推荐系统的 Hermes 候选研究员。只输出 JSON，不要输出 Markdown。"
+                    "这是只读 research route；不要修改文件、数据库、memory、消息或网络通道。"
+                ),
+                "user_prompt": (
+                    "基于用户画像、推荐历史、今日主题、推荐计划和搜索结果，整理候选书研究 dossier。"
+                    "候选必须是真正的书；不要把文章、课程、厂商文档、网页或播客当作书。"
+                    "每个 dossier 要说明 title、author、slot_type、theme、source_url、evidence、"
+                    "profile_fit、novelty、start_path、risks 和 confidence。"
+                    "这是推荐生成前的小流程，只能研究和提出候选；最终过滤、排序、落库和投递由 ARC 执行。"
+                    '输出格式严格为 {"candidate_dossiers":[...],"research_warnings":[],"confidence":0.0}。'
+                ),
+                "context": {
+                    "effective_profile_summary": build_effective_profile_summary(profile_context),
+                    "profile_context": _bounded_text(profile_context, INTENT_PROFILE_CONTEXT_MAX_CHARS),
+                    "recommendation_history_context": recommendation_history_context,
+                    "themes": themes,
+                    "theme_intents": self._theme_intents_for_context(themes),
+                    "recommendation_plan": recommendation_plan or {},
+                    "search_results": search_results[:12],
+                    "local_session": self._local_session_context(),
+                },
+                "output_contract": {
+                    "candidate_dossiers": [
+                        {
+                            "title": "string",
+                            "author": "string",
+                            "slot_type": "profile_fit|exploration",
+                            "theme": "string",
+                            "source_url": "string",
+                            "evidence": ["string"],
+                            "profile_fit": "string",
+                            "novelty": "string",
+                            "start_path": "string",
+                            "risks": ["string"],
+                            "confidence": "number 0..1",
+                        }
+                    ],
+                    "research_warnings": ["string"],
+                    "confidence": "number 0..1",
+                },
+                "constraints": _constraints(),
+            }
+        )
+        research = normalize_candidate_research(response)
+        self._remember_local_turn(
+            "reading.recommend.candidate_research_v1",
+            {
+                "theme_count": len(themes),
+                "search_result_count": len(search_results),
+            },
+            {
+                "candidate_count": len(research.get("candidate_dossiers", [])),
+                "candidates": [
+                    {
+                        "title": item.get("title", ""),
+                        "author": item.get("author", ""),
+                        "theme": item.get("theme", ""),
+                    }
+                    for item in research.get("candidate_dossiers", [])[:6]
+                    if isinstance(item, dict)
+                ],
+            },
+        )
+        return research
 
     def generate_recommendations(
         self,
@@ -726,6 +818,55 @@ def normalize_recommendation_review(raw_review: Any) -> dict[str, Any]:
         "global_warnings": [str(item)[:500] for item in global_warnings if str(item).strip()][:20],
         "revision_instructions": [str(item)[:500] for item in revision_instructions if str(item).strip()][:20],
         "confidence": _float_score(raw_review.get("confidence"), 0.0),
+    }
+
+
+def normalize_candidate_research(raw_research: Any) -> dict[str, Any]:
+    if not isinstance(raw_research, dict):
+        return {
+            "schema_version": RECOMMENDATION_CANDIDATE_RESEARCH_SCHEMA_VERSION,
+            "candidate_dossiers": [],
+            "research_warnings": ["Hermes candidate research returned non-object JSON."],
+            "confidence": 0.0,
+        }
+
+    raw_dossiers = raw_research.get("candidate_dossiers") or raw_research.get("candidates") or []
+    if not isinstance(raw_dossiers, list):
+        raw_dossiers = []
+    dossiers = []
+    for index, item in enumerate(raw_dossiers):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("book_title") or "").strip()
+        author = str(item.get("author") or "").strip()
+        if not title:
+            continue
+        dossiers.append(
+            {
+                "title": title[:200],
+                "author": author[:160],
+                "slot_type": _normalize_theme_slot(
+                    item.get("slot_type") or item.get("slot"),
+                    "exploration" if index == 2 else "profile_fit",
+                ),
+                "theme": str(item.get("theme") or "")[:160],
+                "source_url": str(item.get("source_url") or item.get("url") or "")[:500],
+                "evidence": _bounded_string_list(item.get("evidence"), 6, 500),
+                "profile_fit": str(item.get("profile_fit") or "")[:500],
+                "novelty": str(item.get("novelty") or "")[:300],
+                "start_path": str(item.get("start_path") or item.get("reading_suggestion") or "")[:500],
+                "risks": _bounded_string_list(item.get("risks"), 8, 300),
+                "confidence": _float_score(item.get("confidence"), 0.0),
+            }
+        )
+        if len(dossiers) >= 12:
+            break
+
+    return {
+        "schema_version": RECOMMENDATION_CANDIDATE_RESEARCH_SCHEMA_VERSION,
+        "candidate_dossiers": dossiers,
+        "research_warnings": _bounded_string_list(raw_research.get("research_warnings") or raw_research.get("warnings"), 12, 500),
+        "confidence": _float_score(raw_research.get("confidence"), 0.0),
     }
 
 

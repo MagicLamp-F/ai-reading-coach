@@ -304,6 +304,50 @@ class RegeneratingReviewDailyAgent(ReviewCapableDailyAgent):
         }
 
 
+class CandidateResearchDailyAgent(ReviewCapableDailyAgent):
+    name = "candidate-research-daily-agent"
+
+    def __init__(self):
+        super().__init__()
+        self.research_calls = []
+
+    def research_candidates(
+        self,
+        profile_context,
+        recommendation_history_context,
+        themes,
+        recommendation_plan,
+        search_results,
+    ):
+        self.research_calls.append(
+            {
+                "themes": themes,
+                "recommendation_plan": recommendation_plan,
+                "search_results": search_results,
+            }
+        )
+        return {
+            "schema_version": "candidate_research_v1",
+            "candidate_dossiers": [
+                {
+                    "title": "Research Book",
+                    "author": "Hermes",
+                    "slot_type": "profile_fit",
+                    "theme": themes[0],
+                    "source_url": "https://example.test/research-book",
+                    "evidence": ["candidate researcher found a plausible book source"],
+                    "profile_fit": "fits stable preference",
+                    "novelty": "adjacent but not duplicate",
+                    "start_path": "read first chapter",
+                    "risks": ["needs final ARC validation"],
+                    "confidence": 0.8,
+                }
+            ],
+            "research_warnings": [],
+            "confidence": 0.75,
+        }
+
+
 class PlanCapableDailyAgent:
     name = "plan-capable-daily-agent"
 
@@ -646,6 +690,57 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(payload["plan"]["slots"][0]["theme"], "计划文学")
             self.assertIsNotNone(cost)
             self.assertEqual(cost["provider"], "plan-capable-daily-agent")
+            conn.close()
+
+    def test_daily_run_writes_candidate_research_artifact_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            agent = CandidateResearchDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+                candidate_research_enabled=True,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_candidate_research'"
+            ).fetchone()
+            cost = conn.execute(
+                "SELECT * FROM cost_logs WHERE operation = 'reading.recommend.candidate_research_v1'"
+            ).fetchone()
+            recommendation_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM recommendations WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["count"]
+
+            self.assertEqual(len(agent.research_calls), 1)
+            self.assertEqual(recommendation_count, 3)
+            self.assertIsNotNone(artifact)
+            payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], "candidate_research_v1")
+            self.assertTrue(payload["hint_only"])
+            self.assertEqual(payload["route"], "reading.recommend.candidate_research_v1")
+            self.assertEqual(payload["candidate_research"]["candidate_dossiers"][0]["title"], "Research Book")
+            self.assertIsNotNone(cost)
+            self.assertEqual(cost["provider"], "candidate-research-daily-agent")
+            cost_metadata = json.loads(cost["metadata_json"])
+            self.assertEqual(cost_metadata["candidate_dossiers"], 1)
+            self.assertTrue(cost_metadata["hint_only"])
             conn.close()
 
     def test_daily_run_writes_agentic_shadow_artifact_when_enabled(self):

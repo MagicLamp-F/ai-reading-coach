@@ -8,6 +8,7 @@ from app.daily_agent_adapter import (
     build_effective_profile_summary,
     daily_recommendation_runtime_capabilities,
     normalize_agentic_shadow,
+    normalize_candidate_research,
     normalize_recommendation_plan,
     normalize_theme_intents,
 )
@@ -221,6 +222,88 @@ class DailyAgentAdapterTests(unittest.TestCase):
         self.assertEqual(len(plan["slots"][0]["theme"]), 120)
         self.assertEqual(plan["slots"][0]["search_queries"], ["q"])
         self.assertEqual(plan["confidence"], 1.0)
+
+    def test_hermes_adapter_researches_candidates_with_route_payload(self):
+        calls = []
+
+        def runner(argv, input, text, capture_output, timeout, check):
+            calls.append(json.loads(input))
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "candidate_dossiers": [
+                            {
+                                "title": "Research Book",
+                                "author": "Hermes",
+                                "slot_type": "profile_fit",
+                                "theme": "经典文学",
+                                "source_url": "https://example.test/book",
+                                "evidence": ["search result supports this is a book"],
+                                "profile_fit": "fits stable literary preference",
+                                "novelty": "adjacent to prior positive signal",
+                                "start_path": "read opening chapter",
+                                "risks": ["needs source verification"],
+                                "confidence": 0.8,
+                            }
+                        ],
+                        "research_warnings": [],
+                        "confidence": 0.75,
+                    },
+                    ensure_ascii=False,
+                ),
+                stderr="",
+            )
+
+        adapter = HermesDailyRecommendationAdapter("/tmp/hermes-route", timeout_seconds=12, runner=runner)
+
+        research = adapter.research_candidates(
+            profile_context="profile",
+            recommendation_history_context="history",
+            themes=["经典文学", "科幻", "探索"],
+            recommendation_plan={"slots": [{"theme": "经典文学"}]},
+            search_results=[{"title": "Search Hit", "url": "https://example.test", "content": "book evidence"}],
+        )
+
+        self.assertEqual(research["schema_version"], "candidate_research_v1")
+        self.assertEqual(research["candidate_dossiers"][0]["title"], "Research Book")
+        self.assertEqual(calls[0]["route"], "reading.recommend.candidate_research_v1")
+        self.assertEqual(calls[0]["output_schema"], "candidate_research_v1")
+        self.assertEqual(calls[0]["context"]["recommendation_history_context"], "history")
+        self.assertEqual(calls[0]["context"]["search_results"][0]["title"], "Search Hit")
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_sqlite"])
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_files"])
+        self.assertTrue(calls[0]["constraints"]["do_not_send_messages"])
+        self.assertIn("只读 research route", calls[0]["system_prompt"])
+        self.assertIn("候选书研究 dossier", calls[0]["user_prompt"])
+
+    def test_candidate_research_normalization_bounds_dossiers(self):
+        research = normalize_candidate_research(
+            {
+                "candidate_dossiers": [
+                    {
+                        "book_title": "A" * 300,
+                        "author": "B" * 220,
+                        "slot": "fit",
+                        "theme": "T" * 220,
+                        "url": "https://example.test/book",
+                        "evidence": ["e" * 700],
+                        "confidence": 2,
+                    }
+                ],
+                "warnings": ["w"],
+                "confidence": -1,
+            }
+        )
+
+        self.assertEqual(research["schema_version"], "candidate_research_v1")
+        self.assertEqual(research["candidate_dossiers"][0]["slot_type"], "profile_fit")
+        self.assertEqual(len(research["candidate_dossiers"][0]["title"]), 200)
+        self.assertEqual(len(research["candidate_dossiers"][0]["author"]), 160)
+        self.assertEqual(research["candidate_dossiers"][0]["confidence"], 1.0)
+        self.assertEqual(research["research_warnings"], ["w"])
+        self.assertEqual(research["confidence"], 0.0)
 
     def test_hermes_adapter_passes_bounded_local_session_between_route_calls(self):
         calls = []

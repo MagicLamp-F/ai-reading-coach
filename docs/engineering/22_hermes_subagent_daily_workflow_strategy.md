@@ -18,6 +18,7 @@
 - 2026-06-09：已落地 P3 agentic shadow budget policy。`shadow_config`、`delegation_policy` 和 `cost_logs.metadata_json` 会记录 `max_wall_time_seconds`、`max_model_calls`、`max_search_calls`，作为未来 `hermes-agentic-json` 的硬预算契约。
 - 2026-06-09：已落地 P3 agentic shadow tool permission policy。`shadow_config.tool_permissions` 默认 `read_only`，显式禁止 file/database/memory/message/delivery 副作用，并写入 agentic shadow artifact 与 cost metadata。
 - 2026-06-09：已完成 P0 边界命名修正。Adapter 文档明确 `reflect-json` 是 bounded one-shot JSON route，payload 中的本地链路字段从 `previous_turns` 改为 `explicit_payload_context_turns`，避免误解为 Hermes native session/thread。
+- 2026-06-09：已落地 `reading.recommend.candidate_research_v1` 候选研究员小流程。默认关闭，可通过 `ARC_ENABLE_CANDIDATE_RESEARCH=true` 或 `ReadingCoachWorkflow(..., candidate_research_enabled=True)` 启用；输出写入 `recommendation_candidate_research` artifact，本地 JSON 路径位于 `library/candidate-research/YYYY/MM/`，并作为 ARC run-local explicit payload context 的前置研究摘要。
 
 ## 1. 核心结论
 
@@ -706,6 +707,81 @@ plan_v1 不支持、返回空 slots、返回非 JSON object 或执行异常时�
 - 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_recommendation_plan_normalization_bounds_slots` 验证 plan schema 归一化、slot 类型归一化、字段截断和 confidence clamp。
 - 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_uses_recommendation_plan_as_search_hint_when_agent_supports_it` 验证 daily run 会使用 plan 的 search query，写 `recommendation_plan` artifact，记录 `cost_logs.operation='reading.recommend.plan_v1'`，并且最终仍由 ARC 写 `recommendations`。
 - 验证命令：`python3 -m py_compile app/daily_agent_adapter.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
+
+### P2: Candidate Researcher
+
+- [x] 定义 `candidate_research_v1` schema。
+- [x] 新增 `reading.recommend.candidate_research_v1` 调用。
+- [x] 候选研究员默认关闭，启用后在搜索结果之后、正式推荐生成之前运行。
+- [x] 输出 `candidate_dossiers`，只作为 research hint 和 audit artifact，不直接落库或投递。
+
+当前实现：
+
+```text
+app/daily_agent_adapter.py
+  -> HermesDailyRecommendationAdapter.research_candidates()
+  -> route: reading.recommend.candidate_research_v1
+  -> output_schema: candidate_research_v1
+  -> normalize_candidate_research()
+  -> 把候选 dossier 摘要写入 explicit_payload_context_turns，供后续 generate route 参考
+
+app/recommendation_candidate_research.py
+  -> RecommendationCandidateResearchService
+  -> 默认关闭、失败降级、记录 cost、写 recommendation_candidate_research artifact
+
+app/workflow.py
+  -> Tavily/search 之后调用 candidate research
+  -> 正式 recommend.generate 之前完成候选研究
+  -> 不跳过 ARC hard exclusion、source-aware ranking、candidate explainability、review、gating、落库和投递
+```
+
+配置项：
+
+```env
+ARC_ENABLE_CANDIDATE_RESEARCH=false
+```
+
+输出示例：
+
+```json
+{
+  "schema_version": "candidate_research_v1",
+  "candidate_dossiers": [
+    {
+      "title": "Research Book",
+      "author": "Hermes",
+      "slot_type": "profile_fit",
+      "theme": "经典文学",
+      "source_url": "https://example.test/book",
+      "evidence": ["search result supports this is a book"],
+      "profile_fit": "fits stable literary preference",
+      "novelty": "adjacent to prior positive signal",
+      "start_path": "read opening chapter",
+      "risks": ["needs final ARC validation"],
+      "confidence": 0.8
+    }
+  ],
+  "research_warnings": [],
+  "confidence": 0.75
+}
+```
+
+失败边界：
+
+```text
+candidate_research_v1 默认关闭；
+agent 不支持 route 时只写 run warning；
+route 执行异常或返回非 object 时只写 run warning；
+研究结果不直接写 recommendations、不更新 memory、不发消息；
+正式候选仍由 recommend.generate 产生，ARC 继续执行 hard exclusion 和 source-aware ranking。
+```
+
+功能佐证：
+
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_hermes_adapter_researches_candidates_with_route_payload` 验证 Hermes payload 使用 `route=reading.recommend.candidate_research_v1`、`output_schema=candidate_research_v1`，并保留 no-side-effect constraints。
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_candidate_research_normalization_bounds_dossiers` 验证 dossier 字段截断、slot 归一化、warnings 和 confidence clamp。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_candidate_research_artifact_when_enabled` 验证启用 candidate research 后，daily run 仍写正式 `recommendations`，同时写 `recommendation_candidate_research` artifact，并记录 `cost_logs.operation='reading.recommend.candidate_research_v1'`。
+- 验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_candidate_research.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_gating.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ### P2: Shadow Mode
 

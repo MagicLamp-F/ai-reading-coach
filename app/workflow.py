@@ -23,6 +23,7 @@ from app.memory import load_long_term_memory_context
 from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedback
 from app.profile_ingest import FeedbackProfileIngestor
 from app.recommendation_agentic_shadow import RecommendationAgenticShadowService
+from app.recommendation_candidate_research import RecommendationCandidateResearchService
 from app.recommendation_explainability import RecommendationCandidateExplainabilityService
 from app.recommendation_gating import RecommendationGatingService
 from app.recommendation_plan import RecommendationPlanService
@@ -127,6 +128,7 @@ class ReadingCoachWorkflow:
         recommend_review_shadow_enabled: bool | None = None,
         agentic_shadow_enabled: bool | None = None,
         review_gating_enabled: bool | None = None,
+        candidate_research_enabled: bool | None = None,
     ):
         self.repo = repo
         self.search = search
@@ -163,6 +165,11 @@ class ReadingCoachWorkflow:
         self.recommendation_candidate_explainability = RecommendationCandidateExplainabilityService(
             repo=repo,
             library_dir=reading_pack_library_dir,
+        )
+        self.recommendation_candidate_research = RecommendationCandidateResearchService(
+            repo=repo,
+            library_dir=reading_pack_library_dir,
+            enabled=candidate_research_enabled,
         )
         self.recommendation_plan = RecommendationPlanService(
             repo=repo,
@@ -239,6 +246,16 @@ class ReadingCoachWorkflow:
                             "source": search_plan["source"],
                         },
                     )
+
+            self.recommendation_candidate_research.run(
+                run_id=run_id,
+                agent=self.daily_recommendation_agent,
+                profile_context=profile_context,
+                recommendation_history_context=recommendation_history_context,
+                themes=themes,
+                recommendation_plan=recommendation_plan,
+                search_results=search_results,
+            )
 
             recommendation_limit = (
                 self.source_aware_candidate_count
