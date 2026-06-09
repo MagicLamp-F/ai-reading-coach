@@ -29,16 +29,27 @@ class RecommendationAgenticShadowService:
         self.library_dir = library_dir
         self.enabled = _env_bool("ARC_ENABLE_AGENTIC_SHADOW", False) if enabled is None else enabled
         max_subagents = _env_int("ARC_AGENTIC_SHADOW_MAX_SUBAGENTS", 2, 0, 8)
+        max_wall_time_seconds = _env_int("ARC_AGENTIC_SHADOW_TIMEOUT_SECONDS", 90, 1, 600)
+        max_model_calls = _env_int("ARC_AGENTIC_SHADOW_MAX_MODEL_CALLS", 1, 0, 20)
+        max_search_calls = _env_int("ARC_AGENTIC_SHADOW_MAX_SEARCH_CALLS", 0, 0, 50)
         self.shadow_config = {
             "max_subagents": max_subagents,
-            "timeout_seconds": _env_int("ARC_AGENTIC_SHADOW_TIMEOUT_SECONDS", 90, 1, 600),
+            "timeout_seconds": max_wall_time_seconds,
+            "max_wall_time_seconds": max_wall_time_seconds,
+            "max_model_calls": max_model_calls,
+            "max_search_calls": max_search_calls,
             "allow_web_search": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_WEB_SEARCH", False),
             "allow_memory": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_MEMORY", False),
             "allow_file": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_FILE", False),
             "allow_terminal": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_TERMINAL", False),
             "allow_session_search": _env_bool("ARC_AGENTIC_SHADOW_ALLOW_SESSION_SEARCH", False),
             "side_effects_allowed": False,
-            "delegation_policy": _delegation_policy(max_subagents),
+            "delegation_policy": _delegation_policy(
+                max_subagents=max_subagents,
+                max_wall_time_seconds=max_wall_time_seconds,
+                max_model_calls=max_model_calls,
+                max_search_calls=max_search_calls,
+            ),
         }
 
     def run(
@@ -100,6 +111,9 @@ class RecommendationAgenticShadowService:
             "trace_mode": str(shadow.get("trace_mode") or ""),
             "delegation_mode": self.shadow_config["delegation_policy"]["mode"],
             "bounded_delegation_allowed": self.shadow_config["delegation_policy"]["bounded_delegation_allowed"],
+            "max_wall_time_seconds": self.shadow_config["max_wall_time_seconds"],
+            "max_model_calls": self.shadow_config["max_model_calls"],
+            "max_search_calls": self.shadow_config["max_search_calls"],
         }
         self.repo.record_cost(run_id, provider, AGENTIC_SHADOW_ROUTE, 1, metadata)
         shadow_artifact_id = self._write_artifact(
@@ -174,6 +188,9 @@ class RecommendationAgenticShadowService:
                 "latency_ms": latency_ms,
                 "delegation_mode": self.shadow_config["delegation_policy"]["mode"],
                 "bounded_delegation_allowed": self.shadow_config["delegation_policy"]["bounded_delegation_allowed"],
+                "max_wall_time_seconds": self.shadow_config["max_wall_time_seconds"],
+                "max_model_calls": self.shadow_config["max_model_calls"],
+                "max_search_calls": self.shadow_config["max_search_calls"],
             },
         )
 
@@ -331,7 +348,12 @@ def _agent_recommended_action(shadow: dict[str, Any]) -> str:
     return str(comparison.get("recommended_action") or "")[:120]
 
 
-def _delegation_policy(max_subagents: int) -> dict[str, Any]:
+def _delegation_policy(
+    max_subagents: int,
+    max_wall_time_seconds: int,
+    max_model_calls: int,
+    max_search_calls: int,
+) -> dict[str, Any]:
     allowed_roles = [
         "profile_history_reviewer",
         "source_quality_reviewer",
@@ -342,6 +364,9 @@ def _delegation_policy(max_subagents: int) -> dict[str, Any]:
         "mode": "simulated_trace",
         "bounded_delegation_allowed": False,
         "max_subagents": max_subagents,
+        "max_wall_time_seconds": max_wall_time_seconds,
+        "max_model_calls": max_model_calls,
+        "max_search_calls": max_search_calls,
         "allowed_roles": allowed_roles[:max_subagents],
         "read_only": True,
         "side_effects_allowed": False,

@@ -688,10 +688,14 @@ class WorkflowTests(unittest.TestCase):
             ).fetchone()["count"]
 
             self.assertEqual(len(agent.shadow_calls), 1)
-            delegation_policy = agent.shadow_calls[0]["shadow_config"]["delegation_policy"]
+            shadow_config = agent.shadow_calls[0]["shadow_config"]
+            delegation_policy = shadow_config["delegation_policy"]
             self.assertEqual(delegation_policy["mode"], "simulated_trace")
             self.assertFalse(delegation_policy["bounded_delegation_allowed"])
             self.assertTrue(delegation_policy["read_only"])
+            self.assertEqual(delegation_policy["max_wall_time_seconds"], shadow_config["max_wall_time_seconds"])
+            self.assertEqual(delegation_policy["max_model_calls"], shadow_config["max_model_calls"])
+            self.assertEqual(delegation_policy["max_search_calls"], shadow_config["max_search_calls"])
             self.assertEqual(delegation_policy["allowed_roles"][:2], ["profile_history_reviewer", "source_quality_reviewer"])
             self.assertEqual(recommendation_count, 3)
             self.assertIsNotNone(artifact)
@@ -711,6 +715,9 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(cost_metadata["subagents_used"], 2)
             self.assertEqual(cost_metadata["delegation_mode"], "simulated_trace")
             self.assertFalse(cost_metadata["bounded_delegation_allowed"])
+            self.assertEqual(cost_metadata["max_wall_time_seconds"], shadow_config["max_wall_time_seconds"])
+            self.assertEqual(cost_metadata["max_model_calls"], shadow_config["max_model_calls"])
+            self.assertEqual(cost_metadata["max_search_calls"], shadow_config["max_search_calls"])
             self.assertIn("latency_ms", cost_metadata)
             self.assertIsNotNone(comparison_artifact)
             comparison_payload = json.loads(Path(comparison_artifact["path"]).read_text(encoding="utf-8"))
