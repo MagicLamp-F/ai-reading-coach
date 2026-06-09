@@ -25,6 +25,7 @@ from app.profile_ingest import FeedbackProfileIngestor
 from app.recommendation_agentic_shadow import RecommendationAgenticShadowService
 from app.recommendation_candidate_research import RecommendationCandidateResearchService
 from app.recommendation_explainability import RecommendationCandidateExplainabilityService
+from app.recommendation_fact_check import RecommendationFactCheckService
 from app.recommendation_gating import RecommendationGatingService
 from app.recommendation_plan import RecommendationPlanService
 from app.recommendation_review import RecommendationReviewShadowService
@@ -129,6 +130,7 @@ class ReadingCoachWorkflow:
         agentic_shadow_enabled: bool | None = None,
         review_gating_enabled: bool | None = None,
         candidate_research_enabled: bool | None = None,
+        fact_check_enabled: bool | None = None,
     ):
         self.repo = repo
         self.search = search
@@ -170,6 +172,11 @@ class ReadingCoachWorkflow:
             repo=repo,
             library_dir=reading_pack_library_dir,
             enabled=candidate_research_enabled,
+        )
+        self.recommendation_fact_check = RecommendationFactCheckService(
+            repo=repo,
+            library_dir=reading_pack_library_dir,
+            enabled=fact_check_enabled,
         )
         self.recommendation_plan = RecommendationPlanService(
             repo=repo,
@@ -279,6 +286,14 @@ class ReadingCoachWorkflow:
                 raw_candidates=raw_candidates,
                 selected_recommendations=drafts,
                 hard_exclusion_keys=hard_exclusion_keys,
+            )
+            self.recommendation_fact_check.run(
+                run_id=run_id,
+                agent=self.daily_recommendation_agent,
+                profile_context=profile_context,
+                recommendation_history_context=recommendation_history_context,
+                themes=themes,
+                selected_recommendations=drafts,
             )
             self.recommendation_review_shadow.run(
                 run_id=run_id,

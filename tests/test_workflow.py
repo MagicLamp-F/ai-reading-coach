@@ -348,6 +348,46 @@ class CandidateResearchDailyAgent(ReviewCapableDailyAgent):
         }
 
 
+class FactCheckDailyAgent(ReviewCapableDailyAgent):
+    name = "fact-check-daily-agent"
+
+    def __init__(self):
+        super().__init__()
+        self.fact_check_calls = []
+
+    def fact_check_recommendations(
+        self,
+        profile_context,
+        recommendation_history_context,
+        themes,
+        selected_recommendations,
+    ):
+        self.fact_check_calls.append(
+            {
+                "themes": themes,
+                "selected_recommendations": selected_recommendations,
+            }
+        )
+        return {
+            "schema_version": "recommendation_fact_check_v1",
+            "checks": [
+                {
+                    "title": item["title"],
+                    "author": item["author"],
+                    "status": "verified",
+                    "identity_confidence": 0.9,
+                    "source_validity": "book_page",
+                    "evidence": ["test evidence"],
+                    "risks": [],
+                    "recommended_action": "keep",
+                }
+                for item in selected_recommendations
+            ],
+            "global_warnings": [],
+            "confidence": 0.8,
+        }
+
+
 class PlanCapableDailyAgent:
     name = "plan-capable-daily-agent"
 
@@ -740,6 +780,57 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(cost["provider"], "candidate-research-daily-agent")
             cost_metadata = json.loads(cost["metadata_json"])
             self.assertEqual(cost_metadata["candidate_dossiers"], 1)
+            self.assertTrue(cost_metadata["hint_only"])
+            conn.close()
+
+    def test_daily_run_writes_fact_check_artifact_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            agent = FactCheckDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+                fact_check_enabled=True,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_fact_check'"
+            ).fetchone()
+            cost = conn.execute(
+                "SELECT * FROM cost_logs WHERE operation = 'reading.recommend.fact_check_v1'"
+            ).fetchone()
+            recommendation_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM recommendations WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["count"]
+
+            self.assertEqual(len(agent.fact_check_calls), 1)
+            self.assertEqual(recommendation_count, 3)
+            self.assertIsNotNone(artifact)
+            payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], "recommendation_fact_check_v1")
+            self.assertTrue(payload["hint_only"])
+            self.assertEqual(payload["route"], "reading.recommend.fact_check_v1")
+            self.assertEqual(len(payload["fact_check"]["checks"]), 3)
+            self.assertIsNotNone(cost)
+            self.assertEqual(cost["provider"], "fact-check-daily-agent")
+            cost_metadata = json.loads(cost["metadata_json"])
+            self.assertEqual(cost_metadata["check_count"], 3)
             self.assertTrue(cost_metadata["hint_only"])
             conn.close()
 

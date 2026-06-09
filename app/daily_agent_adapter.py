@@ -17,6 +17,7 @@ EFFECTIVE_PROFILE_SUMMARY_MAX_LINES = 12
 THEME_INTENT_SCHEMA_VERSION = "themes_v2"
 RECOMMENDATION_PLAN_SCHEMA_VERSION = "recommendation_plan_v1"
 RECOMMENDATION_CANDIDATE_RESEARCH_SCHEMA_VERSION = "candidate_research_v1"
+RECOMMENDATION_FACT_CHECK_SCHEMA_VERSION = "recommendation_fact_check_v1"
 RECOMMENDATION_REVIEW_SCHEMA_VERSION = "recommendation_review_v1"
 AGENTIC_SHADOW_SCHEMA_VERSION = "agentic_shadow_v1"
 DAILY_AGENT_RUNTIME_CAPABILITY_SCHEMA_VERSION = "daily_agent_runtime_capabilities_v1"
@@ -77,6 +78,15 @@ class DailyRecommendationAgentAdapter(Protocol):
         recommendation_history_context: str,
         themes: list[str],
         generated_candidates: list[dict[str, Any]],
+        selected_recommendations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ...
+
+    def fact_check_recommendations(
+        self,
+        profile_context: str,
+        recommendation_history_context: str,
+        themes: list[str],
         selected_recommendations: list[dict[str, Any]],
     ) -> dict[str, Any]:
         ...
@@ -366,6 +376,76 @@ class HermesDailyRecommendationAdapter:
             },
         )
         return research
+
+    def fact_check_recommendations(
+        self,
+        profile_context: str,
+        recommendation_history_context: str,
+        themes: list[str],
+        selected_recommendations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        response = self._call(
+            {
+                "route": "reading.recommend.fact_check_v1",
+                "domain": "reading",
+                "tool_policy": "none",
+                "output_schema": RECOMMENDATION_FACT_CHECK_SCHEMA_VERSION,
+                "format": "json",
+                "system_prompt": (
+                    "你是读书推荐系统的 Hermes 事实核验员。只输出 JSON，不要输出 Markdown。"
+                    "这是只读 fact-check route；不要修改文件、数据库、memory、消息或网络通道。"
+                ),
+                "user_prompt": (
+                    "核验 ARC 已选择的推荐是否是真实书籍，书名和作者是否匹配，source_url 是否像书籍页面。"
+                    "不要做最终推荐决策；只给出 verified|uncertain|unverified、证据、风险和建议检查点。"
+                    "如果 source_url 像文章、课程、厂商文档或普通网页，要明确标记 source_validity 风险。"
+                    "最终过滤、落库和投递仍由 ARC 执行。"
+                    '输出格式严格为 {"checks":[...],"global_warnings":[],"confidence":0.0}。'
+                ),
+                "context": {
+                    "effective_profile_summary": build_effective_profile_summary(profile_context),
+                    "profile_context": _bounded_text(profile_context, INTENT_PROFILE_CONTEXT_MAX_CHARS),
+                    "recommendation_history_context": recommendation_history_context,
+                    "themes": themes,
+                    "theme_intents": self._theme_intents_for_context(themes),
+                    "selected_recommendations": selected_recommendations[:6],
+                    "local_session": self._local_session_context(),
+                },
+                "output_contract": {
+                    "checks": [
+                        {
+                            "title": "string",
+                            "author": "string",
+                            "status": "verified|uncertain|unverified",
+                            "identity_confidence": "number 0..1",
+                            "source_validity": "book_page|publisher_page|review_page|article_like|unknown",
+                            "evidence": ["string"],
+                            "risks": ["string"],
+                            "recommended_action": "keep|needs_source_check|replace",
+                        }
+                    ],
+                    "global_warnings": ["string"],
+                    "confidence": "number 0..1",
+                },
+                "constraints": _constraints(),
+            }
+        )
+        fact_check = normalize_recommendation_fact_check(response)
+        self._remember_local_turn(
+            "reading.recommend.fact_check_v1",
+            {
+                "selected_recommendations": len(selected_recommendations),
+            },
+            {
+                "check_count": len(fact_check.get("checks", [])),
+                "unverified_count": sum(
+                    1
+                    for item in fact_check.get("checks", [])
+                    if isinstance(item, dict) and item.get("status") == "unverified"
+                ),
+            },
+        )
+        return fact_check
 
     def generate_recommendations(
         self,
@@ -867,6 +947,56 @@ def normalize_candidate_research(raw_research: Any) -> dict[str, Any]:
         "candidate_dossiers": dossiers,
         "research_warnings": _bounded_string_list(raw_research.get("research_warnings") or raw_research.get("warnings"), 12, 500),
         "confidence": _float_score(raw_research.get("confidence"), 0.0),
+    }
+
+
+def normalize_recommendation_fact_check(raw_fact_check: Any) -> dict[str, Any]:
+    if not isinstance(raw_fact_check, dict):
+        return {
+            "schema_version": RECOMMENDATION_FACT_CHECK_SCHEMA_VERSION,
+            "checks": [],
+            "global_warnings": ["Hermes fact check returned non-object JSON."],
+            "confidence": 0.0,
+        }
+
+    raw_checks = raw_fact_check.get("checks")
+    if not isinstance(raw_checks, list):
+        raw_checks = []
+    checks = []
+    for item in raw_checks:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        status = str(item.get("status") or "uncertain").strip().lower()
+        if status not in {"verified", "uncertain", "unverified"}:
+            status = "uncertain"
+        source_validity = str(item.get("source_validity") or "unknown").strip().lower()
+        if source_validity not in {"book_page", "publisher_page", "review_page", "article_like", "unknown"}:
+            source_validity = "unknown"
+        recommended_action = str(item.get("recommended_action") or "needs_source_check").strip().lower()
+        if recommended_action not in {"keep", "needs_source_check", "replace"}:
+            recommended_action = "needs_source_check"
+        checks.append(
+            {
+                "title": title[:200],
+                "author": str(item.get("author") or "")[:160],
+                "status": status,
+                "identity_confidence": _float_score(item.get("identity_confidence"), 0.0),
+                "source_validity": source_validity,
+                "evidence": _bounded_string_list(item.get("evidence"), 8, 500),
+                "risks": _bounded_string_list(item.get("risks"), 8, 300),
+                "recommended_action": recommended_action,
+            }
+        )
+        if len(checks) >= 12:
+            break
+    return {
+        "schema_version": RECOMMENDATION_FACT_CHECK_SCHEMA_VERSION,
+        "checks": checks,
+        "global_warnings": _bounded_string_list(raw_fact_check.get("global_warnings") or raw_fact_check.get("warnings"), 12, 500),
+        "confidence": _float_score(raw_fact_check.get("confidence"), 0.0),
     }
 
 

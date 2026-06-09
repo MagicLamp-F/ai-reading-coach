@@ -9,6 +9,7 @@ from app.daily_agent_adapter import (
     daily_recommendation_runtime_capabilities,
     normalize_agentic_shadow,
     normalize_candidate_research,
+    normalize_recommendation_fact_check,
     normalize_recommendation_plan,
     normalize_theme_intents,
 )
@@ -304,6 +305,82 @@ class DailyAgentAdapterTests(unittest.TestCase):
         self.assertEqual(research["candidate_dossiers"][0]["confidence"], 1.0)
         self.assertEqual(research["research_warnings"], ["w"])
         self.assertEqual(research["confidence"], 0.0)
+
+    def test_hermes_adapter_fact_checks_recommendations_with_route_payload(self):
+        calls = []
+
+        def runner(argv, input, text, capture_output, timeout, check):
+            calls.append(json.loads(input))
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "checks": [
+                            {
+                                "title": "Fact Book",
+                                "author": "Hermes",
+                                "status": "verified",
+                                "identity_confidence": 0.9,
+                                "source_validity": "book_page",
+                                "evidence": ["publisher page found"],
+                                "risks": [],
+                                "recommended_action": "keep",
+                            }
+                        ],
+                        "global_warnings": [],
+                        "confidence": 0.85,
+                    },
+                    ensure_ascii=False,
+                ),
+                stderr="",
+            )
+
+        adapter = HermesDailyRecommendationAdapter("/tmp/hermes-route", timeout_seconds=12, runner=runner)
+
+        fact_check = adapter.fact_check_recommendations(
+            profile_context="profile",
+            recommendation_history_context="history",
+            themes=["经典文学", "科幻", "探索"],
+            selected_recommendations=[{"title": "Fact Book", "author": "Hermes"}],
+        )
+
+        self.assertEqual(fact_check["schema_version"], "recommendation_fact_check_v1")
+        self.assertEqual(fact_check["checks"][0]["status"], "verified")
+        self.assertEqual(calls[0]["route"], "reading.recommend.fact_check_v1")
+        self.assertEqual(calls[0]["output_schema"], "recommendation_fact_check_v1")
+        self.assertEqual(calls[0]["context"]["selected_recommendations"][0]["title"], "Fact Book")
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_sqlite"])
+        self.assertTrue(calls[0]["constraints"]["do_not_modify_files"])
+        self.assertTrue(calls[0]["constraints"]["do_not_send_messages"])
+        self.assertIn("只读 fact-check route", calls[0]["system_prompt"])
+        self.assertIn("verified|uncertain|unverified", calls[0]["user_prompt"])
+
+    def test_recommendation_fact_check_normalization_bounds_checks(self):
+        fact_check = normalize_recommendation_fact_check(
+            {
+                "checks": [
+                    {
+                        "title": "A" * 300,
+                        "author": "B" * 220,
+                        "status": "bad",
+                        "identity_confidence": 2,
+                        "source_validity": "bad",
+                        "recommended_action": "bad",
+                    }
+                ],
+                "warnings": ["w"],
+                "confidence": 2,
+            }
+        )
+
+        self.assertEqual(fact_check["schema_version"], "recommendation_fact_check_v1")
+        self.assertEqual(fact_check["checks"][0]["status"], "uncertain")
+        self.assertEqual(fact_check["checks"][0]["source_validity"], "unknown")
+        self.assertEqual(fact_check["checks"][0]["recommended_action"], "needs_source_check")
+        self.assertEqual(fact_check["checks"][0]["identity_confidence"], 1.0)
+        self.assertEqual(fact_check["global_warnings"], ["w"])
+        self.assertEqual(fact_check["confidence"], 1.0)
 
     def test_hermes_adapter_passes_bounded_local_session_between_route_calls(self):
         calls = []

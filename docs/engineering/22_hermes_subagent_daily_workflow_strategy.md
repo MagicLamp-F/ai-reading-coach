@@ -19,6 +19,7 @@
 - 2026-06-09：已落地 P3 agentic shadow tool permission policy。`shadow_config.tool_permissions` 默认 `read_only`，显式禁止 file/database/memory/message/delivery 副作用，并写入 agentic shadow artifact 与 cost metadata。
 - 2026-06-09：已完成 P0 边界命名修正。Adapter 文档明确 `reflect-json` 是 bounded one-shot JSON route，payload 中的本地链路字段从 `previous_turns` 改为 `explicit_payload_context_turns`，避免误解为 Hermes native session/thread。
 - 2026-06-09：已落地 `reading.recommend.candidate_research_v1` 候选研究员小流程。默认关闭，可通过 `ARC_ENABLE_CANDIDATE_RESEARCH=true` 或 `ReadingCoachWorkflow(..., candidate_research_enabled=True)` 启用；输出写入 `recommendation_candidate_research` artifact，本地 JSON 路径位于 `library/candidate-research/YYYY/MM/`，并作为 ARC run-local explicit payload context 的前置研究摘要。
+- 2026-06-09：已落地 `reading.recommend.fact_check_v1` 事实核验员小流程。默认关闭，可通过 `ARC_ENABLE_RECOMMEND_FACT_CHECK=true` 或 `ReadingCoachWorkflow(..., fact_check_enabled=True)` 启用；输出写入 `recommendation_fact_check` artifact，本地 JSON 路径位于 `library/fact-checks/YYYY/MM/`，检查书名/作者/source URL 可信度。
 
 ## 1. 核心结论
 
@@ -782,6 +783,77 @@ route 执行异常或返回非 object 时只写 run warning；
 - 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_candidate_research_normalization_bounds_dossiers` 验证 dossier 字段截断、slot 归一化、warnings 和 confidence clamp。
 - 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_candidate_research_artifact_when_enabled` 验证启用 candidate research 后，daily run 仍写正式 `recommendations`，同时写 `recommendation_candidate_research` artifact，并记录 `cost_logs.operation='reading.recommend.candidate_research_v1'`。
 - 验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_candidate_research.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_gating.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
+
+### P2: Fact Checker
+
+- [x] 定义 `recommendation_fact_check_v1` schema。
+- [x] 新增 `reading.recommend.fact_check_v1` 调用。
+- [x] 事实核验员默认关闭，启用后在 ARC 选出候选后、review shadow 前运行。
+- [x] 输出 `verified|uncertain|unverified` 检查结果，只作为 audit artifact，不直接改推荐。
+
+当前实现：
+
+```text
+app/daily_agent_adapter.py
+  -> HermesDailyRecommendationAdapter.fact_check_recommendations()
+  -> route: reading.recommend.fact_check_v1
+  -> output_schema: recommendation_fact_check_v1
+  -> normalize_recommendation_fact_check()
+
+app/recommendation_fact_check.py
+  -> RecommendationFactCheckService
+  -> 默认关闭、失败降级、记录 cost、写 recommendation_fact_check artifact
+
+app/workflow.py
+  -> hard exclusion / source-aware ranking 后调用 fact check
+  -> review shadow / agentic shadow / gating 前完成核验
+  -> 不直接改 selected recommendations、SQLite 主表、memory 或 delivery
+```
+
+配置项：
+
+```env
+ARC_ENABLE_RECOMMEND_FACT_CHECK=false
+```
+
+输出示例：
+
+```json
+{
+  "schema_version": "recommendation_fact_check_v1",
+  "checks": [
+    {
+      "title": "Fact Book",
+      "author": "Hermes",
+      "status": "verified",
+      "identity_confidence": 0.9,
+      "source_validity": "book_page",
+      "evidence": ["publisher page found"],
+      "risks": [],
+      "recommended_action": "keep"
+    }
+  ],
+  "global_warnings": [],
+  "confidence": 0.85
+}
+```
+
+失败边界：
+
+```text
+fact_check_v1 默认关闭；
+agent 不支持 route 时只写 run warning；
+route 执行异常或返回非 object 时只写 run warning；
+核验结果不直接 block、不直接 replace、不写 memory、不发消息；
+未来如进入 gating，也必须由 ARC local confirmation 决定是否执行强制动作。
+```
+
+功能佐证：
+
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_hermes_adapter_fact_checks_recommendations_with_route_payload` 验证 Hermes payload 使用 `route=reading.recommend.fact_check_v1`、`output_schema=recommendation_fact_check_v1`，并保留 no-side-effect constraints。
+- 单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_recommendation_fact_check_normalization_bounds_checks` 验证 status、source_validity、recommended_action、confidence 的归一化和 clamp。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_fact_check_artifact_when_enabled` 验证启用 fact check 后，daily run 仍写正式 `recommendations`，同时写 `recommendation_fact_check` artifact，并记录 `cost_logs.operation='reading.recommend.fact_check_v1'`。
+- 验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_candidate_research.py app/recommendation_fact_check.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_gating.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ### P2: Shadow Mode
 
