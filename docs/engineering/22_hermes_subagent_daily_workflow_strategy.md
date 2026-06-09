@@ -13,6 +13,7 @@
 - 2026-06-09：已落地 shadow feedback alignment。新增 `align-shadow-feedback` CLI，可在用户反馈出现后读取历史 `recommendation_shadow_comparison` artifact 和 SQLite `feedback_events`，输出 `recommendation_shadow_feedback_alignment` artifact，本地 JSON 路径位于 `library/shadow-feedback-alignments/YYYY/MM/`。
 - 2026-06-09：已落地 P3 review gating decision artifact。默认关闭，可通过 `ARC_ENABLE_REVIEW_GATING=true` 或 `ReadingCoachWorkflow(..., review_gating_enabled=True)` 启用。当前阶段只写 `recommendation_gating_decision` artifact，本地 JSON 路径位于 `library/gating-decisions/YYYY/MM/`；不会默认拦截正式推荐入库、reading pack 或投递。
 - 2026-06-09：已落地 P3 `request_regenerate_slot` observe-only 支持。Gating 会从 `recommendation_review` 的 `candidate_reviews.status=replace/remove/revise/regenerate/needs_check` 或 `revision_instructions` 提取结构化 `requested_actions`，但当前 run 不自动重生成、不改 selected recommendations。
+- 2026-06-09：已完成 P3 agentic runtime wrapper 评估。结论是短期不新增 wrapper，继续用 `reflect-json` 承载 bounded JSON routes；只有当需要真实 bounded delegation 时，才新增实验性 `hermes-agentic-json`，并保持只读、无副作用、shadow-first。
 
 ## 1. 核心结论
 
@@ -989,11 +990,59 @@ warn:
 
 ### P3: Agentic Runtime
 
-- [ ] 评估是否需要新 wrapper，例如 `hermes-agentic-json`。
+- [x] 评估是否需要新 wrapper，例如 `hermes-agentic-json`。
 - [ ] 支持 bounded delegation。
 - [ ] 支持 max wall time、max subagents、max model calls、max search calls。
 - [ ] 工具权限默认只读。
 - [ ] 禁止 file/database/memory/message side effects。
+
+评估结论：
+
+```text
+短期 daily workflow 不需要新增 wrapper。
+
+原因：
+  - 已落地的 plan / review / agentic_shadow / gating 都是 bounded JSON route。
+  - 当前 `reflect-json` 的 no-side-effect 边界更适合生产 daily。
+  - ARC 仍是 SQLite、artifact、memory application、delivery 和 run state 的唯一 owner。
+  - 在没有 shadow 后验收益数据前，引入 native delegation runtime 会增加成本、延迟和审计复杂度。
+
+中期只有在需要真实 Hermes 子 agent delegation 时，才新增实验性 `hermes-agentic-json`。
+```
+
+`hermes-agentic-json` 若未来实现，必须满足：
+
+```text
+runtime scope:
+  - 只能服务 shadow / review / verifier route。
+  - 不能成为 run-daily 主 orchestrator。
+  - 不能直接写 SQLite、library artifacts、USER.md、MEMORY.md、delivery outbox 或消息通道。
+
+required controls:
+  - max_wall_time_seconds
+  - max_subagents
+  - max_model_calls
+  - max_search_calls
+  - read_only_tools=true
+  - side_effects_allowed=false
+  - structured trace artifact
+  - route-level timeout and fallback
+```
+
+决策记录：
+
+| 选项 | 当前结论 | 理由 |
+| --- | --- | --- |
+| 继续 `reflect-json` | 采用 | 足够承载 bounded JSON routes，失败边界清楚，已有 runtime capability 和测试覆盖。 |
+| 立即替换为 agentic wrapper | 不采用 | 会把 daily 自动任务暴露给更高非确定性，且目前 shadow 后验数据不足。 |
+| 新增实验性 `hermes-agentic-json` | 暂缓 | 等 agentic shadow leaderboard / feedback alignment 证明收益后，再做只读实验 runtime。 |
+
+功能佐证：
+
+- `app/daily_agent_adapter.py` 的 `runtime_capabilities()` 已明确记录 `runtime=reflect-json`，且 `supports_delegation=false`、`supports_file=false`、`supports_terminal=false`、`supports_web=false`、`side_effects_allowed=false`。
+- `run_logs.metadata_json.hermes_runtime_capabilities` 已在 daily run 开始时写入，可作为后续判断是否允许 agentic runtime 的事实依据。
+- 已有单元测试 `tests.test_daily_agent_adapter.DailyAgentAdapterTests.test_hermes_adapter_reports_reflect_json_runtime_capabilities` 和 `tests.test_workflow.WorkflowTests.test_daily_run_records_runtime_capabilities_in_run_metadata` 证明当前 runtime capability 被正确声明和落库。
+- 回归验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_gating.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ## 9. 风险矩阵
 
