@@ -20,6 +20,7 @@
 - 2026-06-09：已完成 P0 边界命名修正。Adapter 文档明确 `reflect-json` 是 bounded one-shot JSON route，payload 中的本地链路字段从 `previous_turns` 改为 `explicit_payload_context_turns`，避免误解为 Hermes native session/thread。
 - 2026-06-09：已落地 `reading.recommend.candidate_research_v1` 候选研究员小流程。默认关闭，可通过 `ARC_ENABLE_CANDIDATE_RESEARCH=true` 或 `ReadingCoachWorkflow(..., candidate_research_enabled=True)` 启用；输出写入 `recommendation_candidate_research` artifact，本地 JSON 路径位于 `library/candidate-research/YYYY/MM/`，并作为 ARC run-local explicit payload context 的前置研究摘要。
 - 2026-06-09：已落地 `reading.recommend.fact_check_v1` 事实核验员小流程。默认关闭，可通过 `ARC_ENABLE_RECOMMEND_FACT_CHECK=true` 或 `ReadingCoachWorkflow(..., fact_check_enabled=True)` 启用；输出写入 `recommendation_fact_check` artifact，本地 JSON 路径位于 `library/fact-checks/YYYY/MM/`，检查书名/作者/source URL 可信度。
+- 2026-06-09：已将 fact-check 接入 P3 gating observe-only 决策。`recommendation_gating_decision` 会读取同 run 的 `recommendation_fact_check` artifact，汇总 `unverified`、`article_like`、`needs_source_check` 和 `replace` 风险；高风险结果只生成 `request_regenerate_slot` 或 `warn_delivery` 建议，不默认拦截投递。
 
 ## 1. 核心结论
 
@@ -1073,8 +1074,8 @@ feedback_alignment:
 ```text
 app/recommendation_gating.py
   -> RecommendationGatingService
-  -> 读取同一 run 最新 recommendation_review / recommendation_agentic_shadow artifact
-  -> 汇总 review verdict、agentic shadow recommended_action 和 ARC local confirmations
+  -> 读取同一 run 最新 recommendation_review / recommendation_agentic_shadow / recommendation_fact_check artifact
+  -> 汇总 review verdict、agentic shadow recommended_action、fact-check findings 和 ARC local confirmations
   -> 提取 request_regenerate_slot requested_actions
   -> 写 recommendation_gating_decision artifact
 
@@ -1099,6 +1100,8 @@ P3 gating 当前是 observe-only；
 默认不会阻断正式 recommendations 入库、reading pack 生成或飞书 delivery；
 review verdict=reject 只会把 suggested_action 标为 suggest_block_delivery；
 review requested regenerate 只会把 suggested_action 标为 request_regenerate_slot；
+fact-check unverified / replace 只会把 suggested_action 标为 request_regenerate_slot；
+fact-check article_like / needs_source_check 只会把 suggested_action 降为 warn_delivery；
 LLM review/shadow suggestion 不能单独变成强制 block；
 未来如启用强制 block，也必须同时满足 ARC local block confirmation，例如 selected_recommendations 为空。
 ```
@@ -1135,17 +1138,33 @@ warn:
   "schema_version": "recommendation_gating_decision_v1",
   "decision": {
     "mode": "observe_only",
-    "suggested_action": "suggest_block_delivery",
+    "suggested_action": "request_regenerate_slot",
     "enforced_action": "observe_only",
     "review": {
       "artifact_present": true,
-      "verdict": "reject"
+      "verdict": "accept"
     },
     "agentic_shadow": {
       "artifact_present": false,
       "recommended_action": ""
     },
-    "requested_actions": [],
+    "fact_check": {
+      "artifact_present": true,
+      "check_count": 1,
+      "unverified_count": 1,
+      "article_like_count": 1,
+      "needs_source_check_count": 0,
+      "replace_recommendation_count": 1
+    },
+    "requested_actions": [
+      {
+        "action": "request_regenerate_slot",
+        "scope": "slot",
+        "source": "fact_check",
+        "title": "Fact Book",
+        "reason": "status=unverified; source_validity=article_like; recommended_action=replace"
+      }
+    ],
     "local_confirmations": []
   }
 }
@@ -1156,7 +1175,8 @@ warn:
 - 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_review_gating_decision_artifact_when_enabled` 验证启用 review shadow + gating 后，daily run 仍写 3 条正式推荐，同时写 `recommendation_gating_decision` artifact；accept verdict 会得到 `suggested_action=allow_delivery`、`enforced_action=observe_only`。
 - 单元测试 `tests.test_workflow.WorkflowTests.test_review_gating_reject_remains_observe_only_without_local_block` 验证 Hermes review 返回 `reject` 时，gating artifact 只记录 `suggested_action=suggest_block_delivery`，没有 ARC local block confirmation 时仍保持 `enforced_action=observe_only`，正式推荐仍落库 3 条。
 - 单元测试 `tests.test_workflow.WorkflowTests.test_review_gating_records_regenerate_slot_request_as_observe_only` 验证 Hermes review 要求替换单个 `profile_fit` slot 时，gating artifact 会写 `requested_actions[].action=request_regenerate_slot`，`suggested_action=request_regenerate_slot`，但 `enforced_action=observe_only`，正式推荐仍落库 3 条。
-- 验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_gating.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_review_gating_uses_fact_check_findings_as_observe_only_regenerate_request` 验证 fact-check 返回 `unverified` / `article_like` / `replace` 时，gating artifact 会写 `fact_check` 风险计数和 `requested_actions[].source=fact_check`，但 `enforced_action=observe_only`，正式推荐仍落库 3 条。
+- 验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_candidate_research.py app/recommendation_fact_check.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_gating.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ### P3: Agentic Runtime
 

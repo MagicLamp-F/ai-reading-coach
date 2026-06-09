@@ -39,14 +39,17 @@ class RecommendationGatingService:
 
         review_artifact = self._latest_artifact(run_id, "recommendation_review")
         shadow_artifact = self._latest_artifact(run_id, "recommendation_agentic_shadow")
+        fact_check_artifact = self._latest_artifact(run_id, "recommendation_fact_check")
         review_payload = _load_json_file(Path(str(review_artifact["path"]))) if review_artifact is not None else None
         shadow_payload = _load_json_file(Path(str(shadow_artifact["path"]))) if shadow_artifact is not None else None
+        fact_check_payload = _load_json_file(Path(str(fact_check_artifact["path"]))) if fact_check_artifact is not None else None
         decision = _build_gating_decision(
             run_id=run_id,
             selected_recommendations=selected_recommendations,
             target_count=target_count,
             review_payload=review_payload if isinstance(review_payload, dict) else None,
             shadow_payload=shadow_payload if isinstance(shadow_payload, dict) else None,
+            fact_check_payload=fact_check_payload if isinstance(fact_check_payload, dict) else None,
             enforce_block=self.enforce_block,
         )
         artifact_id = self._write_artifact(run_id, decision)
@@ -106,6 +109,7 @@ def _build_gating_decision(
     target_count: int,
     review_payload: dict[str, Any] | None,
     shadow_payload: dict[str, Any] | None,
+    fact_check_payload: dict[str, Any] | None,
     enforce_block: bool,
 ) -> dict[str, Any]:
     review = review_payload.get("review") if isinstance(review_payload, dict) else None
@@ -114,11 +118,17 @@ def _build_gating_decision(
     agentic_shadow = shadow_payload.get("agentic_shadow") if isinstance(shadow_payload, dict) else None
     if not isinstance(agentic_shadow, dict):
         agentic_shadow = {}
+    fact_check = fact_check_payload.get("fact_check") if isinstance(fact_check_payload, dict) else None
+    if not isinstance(fact_check, dict):
+        fact_check = {}
 
     local_confirmations = _local_gating_confirmations(selected_recommendations, target_count)
     review_verdict = str(review.get("verdict") or "").strip().lower()
     shadow_action = _shadow_recommended_action(agentic_shadow)
-    requested_actions = _review_requested_actions(review, selected_recommendations)
+    review_requested_actions = _review_requested_actions(review, selected_recommendations)
+    fact_check_requested_actions = _fact_check_requested_actions(fact_check, selected_recommendations)
+    requested_actions = review_requested_actions + fact_check_requested_actions
+    fact_check_summary = _fact_check_summary(fact_check)
     suggestions = []
     if review_verdict == "reject":
         suggestions.append("suggest_block_delivery")
@@ -127,6 +137,10 @@ def _build_gating_decision(
     if requested_actions:
         suggestions.append("request_regenerate_slot")
     if shadow_action in {"needs_more_evidence", "suggest_block_delivery"}:
+        suggestions.append("warn_delivery")
+    if fact_check_requested_actions:
+        suggestions.append("request_regenerate_slot")
+    if fact_check_summary["article_like_count"] or fact_check_summary["needs_source_check_count"]:
         suggestions.append("warn_delivery")
     if any(reason["severity"] == "block" for reason in local_confirmations):
         suggestions.append("suggest_block_delivery")
@@ -160,12 +174,17 @@ def _build_gating_decision(
             "warning_count": len(agentic_shadow.get("warnings", [])) if isinstance(agentic_shadow.get("warnings"), list) else 0,
             "subagents_used": _int_value(agentic_shadow.get("subagents_used"), 0),
         },
+        "fact_check": {
+            "artifact_present": fact_check_payload is not None,
+            **fact_check_summary,
+        },
         "requested_actions": requested_actions,
         "local_confirmations": local_confirmations,
         "selected_recommendations": [_draft_to_payload(draft) for draft in selected_recommendations],
         "notes": [
             "Gating is observe-only unless ARC_REVIEW_GATING_ENFORCE_BLOCK=true.",
             "request_regenerate_slot is recorded as a suggestion only; ARC does not regenerate in the current run.",
+            "Fact-check findings are advisory unless ARC local rules confirm a hard block.",
             "LLM review/shadow suggestions cannot block delivery without ARC local block confirmation.",
         ],
     }
@@ -261,6 +280,81 @@ def _review_requested_actions(
             }
         )
     return actions
+
+
+def _fact_check_requested_actions(
+    fact_check: dict[str, Any],
+    selected_recommendations: list[RecommendationDraft],
+) -> list[dict[str, str]]:
+    selected_by_key = {_book_key(draft.title, draft.author): draft for draft in selected_recommendations}
+    actions: list[dict[str, str]] = []
+    checks = fact_check.get("checks")
+    if not isinstance(checks, list):
+        return actions
+    for item in checks:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        recommended_action = str(item.get("recommended_action") or "").strip().lower()
+        if status != "unverified" and recommended_action != "replace":
+            continue
+        title = str(item.get("title") or "").strip()
+        author = str(item.get("author") or "").strip()
+        selected = selected_by_key.get(_book_key(title, author))
+        action = {
+            "action": "request_regenerate_slot",
+            "scope": "slot",
+            "source": "fact_check",
+            "title": title[:200],
+            "author": author[:160],
+            "slot_type": (selected.slot_type if selected is not None else "")[:80],
+            "theme": (selected.theme if selected is not None else "")[:160],
+            "reason": _fact_check_reason(item),
+        }
+        actions.append(action)
+        if len(actions) >= 10:
+            break
+    return actions
+
+
+def _fact_check_summary(fact_check: dict[str, Any]) -> dict[str, int]:
+    checks = fact_check.get("checks")
+    if not isinstance(checks, list):
+        return {
+            "check_count": 0,
+            "unverified_count": 0,
+            "uncertain_count": 0,
+            "article_like_count": 0,
+            "needs_source_check_count": 0,
+            "replace_recommendation_count": 0,
+        }
+    items = [item for item in checks if isinstance(item, dict)]
+    return {
+        "check_count": len(items),
+        "unverified_count": sum(1 for item in items if str(item.get("status") or "").strip().lower() == "unverified"),
+        "uncertain_count": sum(1 for item in items if str(item.get("status") or "").strip().lower() == "uncertain"),
+        "article_like_count": sum(1 for item in items if str(item.get("source_validity") or "").strip().lower() == "article_like"),
+        "needs_source_check_count": sum(
+            1 for item in items if str(item.get("recommended_action") or "").strip().lower() == "needs_source_check"
+        ),
+        "replace_recommendation_count": sum(
+            1 for item in items if str(item.get("recommended_action") or "").strip().lower() == "replace"
+        ),
+    }
+
+
+def _fact_check_reason(item: dict[str, Any]) -> str:
+    parts = [
+        f"status={str(item.get('status') or '').strip().lower()}",
+        f"source_validity={str(item.get('source_validity') or '').strip().lower()}",
+        f"recommended_action={str(item.get('recommended_action') or '').strip().lower()}",
+    ]
+    risks = item.get("risks")
+    if isinstance(risks, list):
+        risk_text = "; ".join(str(risk).strip() for risk in risks if str(risk).strip())
+        if risk_text:
+            parts.append(f"risks={risk_text[:300]}")
+    return "; ".join(part for part in parts if part)
 
 
 def _action_reason(raw_reasons: Any, fallback: str) -> str:

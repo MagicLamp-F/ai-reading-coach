@@ -388,6 +388,41 @@ class FactCheckDailyAgent(ReviewCapableDailyAgent):
         }
 
 
+class UnverifiedFactCheckDailyAgent(FactCheckDailyAgent):
+    name = "unverified-fact-check-daily-agent"
+
+    def fact_check_recommendations(
+        self,
+        profile_context,
+        recommendation_history_context,
+        themes,
+        selected_recommendations,
+    ):
+        super().fact_check_recommendations(
+            profile_context=profile_context,
+            recommendation_history_context=recommendation_history_context,
+            themes=themes,
+            selected_recommendations=selected_recommendations,
+        )
+        return {
+            "schema_version": "recommendation_fact_check_v1",
+            "checks": [
+                {
+                    "title": selected_recommendations[0]["title"],
+                    "author": selected_recommendations[0]["author"],
+                    "status": "unverified",
+                    "identity_confidence": 0.2,
+                    "source_validity": "article_like",
+                    "evidence": ["source looked article-like in fact-check"],
+                    "risks": ["book identity not confirmed"],
+                    "recommended_action": "replace",
+                }
+            ],
+            "global_warnings": ["one recommendation could not be verified"],
+            "confidence": 0.7,
+        }
+
+
 class PlanCapableDailyAgent:
     name = "plan-capable-daily-agent"
 
@@ -1458,6 +1493,57 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(action["action"], "request_regenerate_slot")
             self.assertEqual(action["scope"], "slot")
             self.assertEqual(action["slot_type"], "profile_fit")
+            self.assertEqual(action["title"], "Review Book 1")
+            conn.close()
+
+    def test_review_gating_uses_fact_check_findings_as_observe_only_regenerate_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            agent = UnverifiedFactCheckDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+                fact_check_enabled=True,
+                review_gating_enabled=True,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_gating_decision'"
+            ).fetchone()
+            recommendation_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM recommendations WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["count"]
+
+            self.assertEqual(recommendation_count, 3)
+            self.assertIsNotNone(artifact)
+            payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            decision = payload["decision"]
+            self.assertEqual(decision["suggested_action"], "request_regenerate_slot")
+            self.assertEqual(decision["enforced_action"], "observe_only")
+            self.assertTrue(decision["fact_check"]["artifact_present"])
+            self.assertEqual(decision["fact_check"]["check_count"], 1)
+            self.assertEqual(decision["fact_check"]["unverified_count"], 1)
+            self.assertEqual(decision["fact_check"]["article_like_count"], 1)
+            self.assertEqual(len(decision["requested_actions"]), 1)
+            action = decision["requested_actions"][0]
+            self.assertEqual(action["source"], "fact_check")
+            self.assertEqual(action["action"], "request_regenerate_slot")
             self.assertEqual(action["title"], "Review Book 1")
             conn.close()
 
