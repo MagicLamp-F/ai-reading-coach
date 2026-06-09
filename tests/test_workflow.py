@@ -227,6 +227,45 @@ class ReviewCapableDailyAgent:
         }
 
 
+class RejectingReviewDailyAgent(ReviewCapableDailyAgent):
+    name = "rejecting-review-daily-agent"
+
+    def review_recommendations(
+        self,
+        profile_context,
+        recommendation_history_context,
+        themes,
+        generated_candidates,
+        selected_recommendations,
+    ):
+        super().review_recommendations(
+            profile_context=profile_context,
+            recommendation_history_context=recommendation_history_context,
+            themes=themes,
+            generated_candidates=generated_candidates,
+            selected_recommendations=selected_recommendations,
+        )
+        return {
+            "verdict": "reject",
+            "candidate_reviews": [
+                {
+                    "title": item["title"],
+                    "author": item["author"],
+                    "status": "remove",
+                    "reasons": ["shadow review says the set should be regenerated"],
+                    "profile_fit_score": 0.1,
+                    "fatigue_risk": "high",
+                    "start_path_quality": "weak",
+                    "resource_type_risk": "uncertain",
+                }
+                for item in selected_recommendations
+            ],
+            "global_warnings": ["shadow review rejected baseline recommendations"],
+            "revision_instructions": ["regenerate recommendation slots"],
+            "confidence": 0.7,
+        }
+
+
 class PlanCapableDailyAgent:
     name = "plan-capable-daily-agent"
 
@@ -1030,6 +1069,98 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(payload["selected_recommendations"]), 3)
             self.assertIsNotNone(cost)
             self.assertEqual(cost["provider"], "review-capable-daily-agent")
+            conn.close()
+
+    def test_daily_run_writes_review_gating_decision_artifact_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            agent = ReviewCapableDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+                recommend_review_shadow_enabled=True,
+                review_gating_enabled=True,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_gating_decision'"
+            ).fetchone()
+            recommendation_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM recommendations WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["count"]
+
+            self.assertEqual(recommendation_count, 3)
+            self.assertIsNotNone(artifact)
+            payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            decision = payload["decision"]
+            self.assertEqual(payload["schema_version"], "recommendation_gating_decision_v1")
+            self.assertEqual(decision["mode"], "observe_only")
+            self.assertEqual(decision["suggested_action"], "allow_delivery")
+            self.assertEqual(decision["enforced_action"], "observe_only")
+            self.assertTrue(decision["review"]["artifact_present"])
+            self.assertEqual(decision["review"]["verdict"], "accept")
+            self.assertEqual(decision["local_confirmations"], [])
+            conn.close()
+
+    def test_review_gating_reject_remains_observe_only_without_local_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            agent = RejectingReviewDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+                recommend_review_shadow_enabled=True,
+                review_gating_enabled=True,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_gating_decision'"
+            ).fetchone()
+            recommendation_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM recommendations WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["count"]
+
+            self.assertEqual(recommendation_count, 3)
+            self.assertIsNotNone(artifact)
+            payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            decision = payload["decision"]
+            self.assertEqual(decision["mode"], "observe_only")
+            self.assertEqual(decision["suggested_action"], "suggest_block_delivery")
+            self.assertEqual(decision["enforced_action"], "observe_only")
+            self.assertEqual(decision["review"]["verdict"], "reject")
+            self.assertEqual(decision["local_confirmations"], [])
             conn.close()
 
     def test_daily_run_records_warning_when_lark_profile_test_summary_fails(self):

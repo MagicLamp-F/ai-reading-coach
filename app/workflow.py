@@ -24,6 +24,7 @@ from app.profile import PROFILE_CATEGORIES, build_profile_context, process_feedb
 from app.profile_ingest import FeedbackProfileIngestor
 from app.recommendation_agentic_shadow import RecommendationAgenticShadowService
 from app.recommendation_explainability import RecommendationCandidateExplainabilityService
+from app.recommendation_gating import RecommendationGatingService
 from app.recommendation_plan import RecommendationPlanService
 from app.recommendation_review import RecommendationReviewShadowService
 from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview
@@ -125,6 +126,7 @@ class ReadingCoachWorkflow:
         profile_ingestor: FeedbackProfileIngestor | None = None,
         recommend_review_shadow_enabled: bool | None = None,
         agentic_shadow_enabled: bool | None = None,
+        review_gating_enabled: bool | None = None,
     ):
         self.repo = repo
         self.search = search
@@ -170,6 +172,11 @@ class ReadingCoachWorkflow:
             repo=repo,
             library_dir=reading_pack_library_dir,
             enabled=agentic_shadow_enabled,
+        )
+        self.recommendation_gating = RecommendationGatingService(
+            repo=repo,
+            library_dir=reading_pack_library_dir,
+            enabled=review_gating_enabled,
         )
 
     def run_daily_recommendations(self) -> int:
@@ -274,6 +281,11 @@ class ReadingCoachWorkflow:
                 recommendation_plan=recommendation_plan,
                 generated_candidates=generated_candidates,
                 selected_recommendations=drafts,
+            )
+            self.recommendation_gating.run(
+                run_id=run_id,
+                selected_recommendations=drafts,
+                target_count=self.daily_recommendation_count,
             )
             if self.daily_recommendation_agent is None and self.llm.api_key:
                 api_calls += 1

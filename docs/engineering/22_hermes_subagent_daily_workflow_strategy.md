@@ -1,6 +1,6 @@
 # Hermes 子 Agent 与 Daily Workflow 策略
 
-更新时间：2026-06-08
+更新时间：2026-06-09
 
 实现状态：
 
@@ -11,6 +11,7 @@
 - 2026-06-08：已落地 `reading.recommend.agentic_shadow_v1` shadow route。默认关闭，仅在 `ARC_ENABLE_AGENTIC_SHADOW=true` 或 `ReadingCoachWorkflow(..., agentic_shadow_enabled=True)` 时启用；输出写入 `recommendation_agentic_shadow` artifact，本地 JSON 路径位于 `library/agentic-shadows/YYYY/MM/`，并记录 `subagents_used`、roles、latency、trace mode 和 warnings。
 - 2026-06-09：已落地 shadow comparison artifact。每次 agentic shadow 成功后同步写 `recommendation_shadow_comparison` artifact，本地 JSON 路径位于 `library/shadow-comparisons/YYYY/MM/`，对比 baseline 与 shadow 的 profile fit、novelty、start path、source validity、cost、latency、overlap 和替换建议。
 - 2026-06-09：已落地 shadow feedback alignment。新增 `align-shadow-feedback` CLI，可在用户反馈出现后读取历史 `recommendation_shadow_comparison` artifact 和 SQLite `feedback_events`，输出 `recommendation_shadow_feedback_alignment` artifact，本地 JSON 路径位于 `library/shadow-feedback-alignments/YYYY/MM/`。
+- 2026-06-09：已落地 P3 review gating decision artifact。默认关闭，可通过 `ARC_ENABLE_REVIEW_GATING=true` 或 `ReadingCoachWorkflow(..., review_gating_enabled=True)` 启用。当前阶段只写 `recommendation_gating_decision` artifact，本地 JSON 路径位于 `library/gating-decisions/YYYY/MM/`；不会默认拦截正式推荐入库、reading pack 或投递。
 
 ## 1. 核心结论
 
@@ -890,10 +891,82 @@ feedback_alignment:
 
 ### P3: Gating
 
-- [ ] 新增 `ARC_ENABLE_REVIEW_GATING=false`。
+- [x] 新增 `ARC_ENABLE_REVIEW_GATING=false`。
 - [ ] 支持 `request_regenerate_slot`。
-- [ ] 支持 `suggest_block_delivery`，但必须 ARC 本地规则确认。
-- [ ] 所有 gating decision 写入 run artifact。
+- [x] 支持 `suggest_block_delivery` observe-only 决策，且 Hermes review/shadow 不能单独触发强制阻断。
+- [x] 所有 gating decision 写入 run artifact。
+
+当前实现：
+
+```text
+app/recommendation_gating.py
+  -> RecommendationGatingService
+  -> 读取同一 run 最新 recommendation_review / recommendation_agentic_shadow artifact
+  -> 汇总 review verdict、agentic shadow recommended_action 和 ARC local confirmations
+  -> 写 recommendation_gating_decision artifact
+
+app/workflow.py
+  -> recommendation review shadow
+  -> agentic shadow
+  -> review gating decision artifact
+  -> 正式 recommendations / reading packs / delivery
+```
+
+配置项：
+
+```env
+ARC_ENABLE_REVIEW_GATING=false
+ARC_REVIEW_GATING_ENFORCE_BLOCK=false
+```
+
+当前安全边界：
+
+```text
+P3 gating 当前是 observe-only；
+默认不会阻断正式 recommendations 入库、reading pack 生成或飞书 delivery；
+review verdict=reject 只会把 suggested_action 标为 suggest_block_delivery；
+LLM review/shadow suggestion 不能单独变成强制 block；
+未来如启用强制 block，也必须同时满足 ARC local block confirmation，例如 selected_recommendations 为空。
+```
+
+local confirmations 当前包括：
+
+```text
+block:
+  - no_selected_recommendations
+
+warn:
+  - selected_count_below_target
+  - missing_reading_path
+```
+
+输出示例：
+
+```json
+{
+  "schema_version": "recommendation_gating_decision_v1",
+  "decision": {
+    "mode": "observe_only",
+    "suggested_action": "suggest_block_delivery",
+    "enforced_action": "observe_only",
+    "review": {
+      "artifact_present": true,
+      "verdict": "reject"
+    },
+    "agentic_shadow": {
+      "artifact_present": false,
+      "recommended_action": ""
+    },
+    "local_confirmations": []
+  }
+}
+```
+
+功能佐证：
+
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_review_gating_decision_artifact_when_enabled` 验证启用 review shadow + gating 后，daily run 仍写 3 条正式推荐，同时写 `recommendation_gating_decision` artifact；accept verdict 会得到 `suggested_action=allow_delivery`、`enforced_action=observe_only`。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_review_gating_reject_remains_observe_only_without_local_block` 验证 Hermes review 返回 `reject` 时，gating artifact 只记录 `suggested_action=suggest_block_delivery`，没有 ARC local block confirmation 时仍保持 `enforced_action=observe_only`，正式推荐仍落库 3 条。
+- 验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_gating.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ### P3: Agentic Runtime
 
