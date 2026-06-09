@@ -170,6 +170,7 @@ class LarkTests(unittest.TestCase):
                 source_count=1,
                 artifact_path="library/2026/05/test/reading-pack.md",
                 status="fallback",
+                reading_pack_url="https://example.test/reading-pack?id=1&token=t",
             ),
         )
 
@@ -178,14 +179,14 @@ class LarkTests(unittest.TestCase):
             for element in http.payload["card"]["elements"]
             if element.get("tag") == "div"
         )
-        self.assertIn("深度读完包", rendered)
-        self.assertIn("来源质量：source_limited / 0.35（1 条来源）", rendered)
-        self.assertIn("这本书讲如何搭建可靠系统", rendered)
-        self.assertIn("先读核心论点和章节地图", rendered)
-        self.assertIn("核心概念", rendered)
-        self.assertIn("章节/部分 walkthrough", rendered)
-        self.assertIn("例子/案例", rendered)
-        self.assertIn("library/2026/05/test/reading-pack.md", rendered)
+        self.assertIn("快读包", rendered)
+        self.assertIn("[打开完整快读包](https://example.test/reading-pack?id=1&token=t)", rendered)
+        self.assertNotIn("来源质量", rendered)
+        self.assertNotIn("这本书讲如何搭建可靠系统", rendered)
+        self.assertNotIn("核心概念", rendered)
+        self.assertNotIn("章节/部分 walkthrough", rendered)
+        self.assertNotIn("例子/案例", rendered)
+        self.assertNotIn("library/2026/05/test/reading-pack.md", rendered)
 
     def test_can_send_standalone_reading_pack_preview_card(self):
         http = CapturingHttp()
@@ -205,6 +206,7 @@ class LarkTests(unittest.TestCase):
                 source_count=1,
                 artifact_path="library/2026/05/test/reading-pack.md",
                 status="generated",
+                reading_pack_url="https://example.test/reading-pack?id=2&token=t",
             )
         )
 
@@ -215,8 +217,10 @@ class LarkTests(unittest.TestCase):
             for element in http.payload["card"]["elements"]
             if element.get("tag") == "div"
         )
-        self.assertIn("深度读完包", rendered)
-        self.assertIn("机器归档", rendered)
+        self.assertIn("快读包", rendered)
+        self.assertIn("[打开完整快读包](https://example.test/reading-pack?id=2&token=t)", rendered)
+        self.assertNotIn("机器归档", rendered)
+        self.assertNotIn("这本书讲如何搭建可靠系统", rendered)
 
     def test_can_send_guided_reading_day_card(self):
         http = CapturingHttp()

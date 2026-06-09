@@ -278,43 +278,12 @@ def _unique_dimensions(drafts: list) -> list[str]:
 
 
 def _reading_pack_elements(reading_pack_preview) -> list[dict]:
-    core_points = getattr(reading_pack_preview, "core_points", ()) or ()
-    core_text = "\n".join(f"- {point}" for point in core_points if str(point).strip())
-    concepts = getattr(reading_pack_preview, "concepts", ()) or ()
-    concept_text = "、".join(str(item) for item in concepts if str(item).strip())
-    chapter_items = getattr(reading_pack_preview, "chapter_items", ()) or ()
-    chapter_text = "\n".join(f"- {item}" for item in chapter_items if str(item).strip())
-    examples = getattr(reading_pack_preview, "examples", ()) or ()
-    example_text = "\n".join(f"- {item}" for item in examples if str(item).strip())
-    limitations = getattr(reading_pack_preview, "limitations", ()) or ()
-    limitation_text = "\n".join(f"- {item}" for item in limitations if str(item).strip())
-    source_status = str(getattr(reading_pack_preview, "source_status", "") or "source_missing")
-    source_score = getattr(reading_pack_preview, "source_coverage_score", 0) or 0
-    source_count = getattr(reading_pack_preview, "source_count", 0) or 0
-    artifact_path = str(getattr(reading_pack_preview, "artifact_path", "") or "")
     reading_pack_url = str(getattr(reading_pack_preview, "reading_pack_url", "") or "")
-    status = str(getattr(reading_pack_preview, "status", "") or "")
-    lines = [
-        "**深度读完包**",
-        f"来源质量：{source_status} / {source_score}（{source_count} 条来源）",
-        f"一句话：{getattr(reading_pack_preview, 'summary', '')}",
-    ]
-    if concept_text:
-        lines.append(f"核心概念：{concept_text}")
-    if core_text:
-        lines.append(f"论证脉络：\n{core_text}")
-    if chapter_text:
-        lines.append(f"章节/部分 walkthrough：\n{chapter_text}")
-    if example_text:
-        lines.append(f"例子/案例：\n{example_text}")
-    lines.append(f"10 分钟路径：{getattr(reading_pack_preview, 'ten_min_route', '')}")
-    if limitation_text:
-        lines.append(f"局限：\n{limitation_text}")
-    if artifact_path:
-        suffix = f"（{status}）" if status else ""
-        lines.append(f"机器归档：`{artifact_path}`{suffix}")
+    lines = ["**快读包**"]
     if reading_pack_url:
         lines.append(f"[打开完整快读包]({reading_pack_url})")
+    else:
+        lines.append("快读包已生成，当前没有可打开链接。")
     return [
         {"tag": "hr"},
         {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
