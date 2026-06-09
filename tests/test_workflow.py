@@ -598,6 +598,9 @@ class WorkflowTests(unittest.TestCase):
             artifact = conn.execute(
                 "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_agentic_shadow'"
             ).fetchone()
+            comparison_artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_shadow_comparison'"
+            ).fetchone()
             cost = conn.execute(
                 "SELECT * FROM cost_logs WHERE operation = 'reading.recommend.agentic_shadow_v1'"
             ).fetchone()
@@ -623,6 +626,15 @@ class WorkflowTests(unittest.TestCase):
             cost_metadata = json.loads(cost["metadata_json"])
             self.assertEqual(cost_metadata["subagents_used"], 2)
             self.assertIn("latency_ms", cost_metadata)
+            self.assertIsNotNone(comparison_artifact)
+            comparison_payload = json.loads(Path(comparison_artifact["path"]).read_text(encoding="utf-8"))
+            comparison = comparison_payload["comparison"]
+            self.assertEqual(comparison_payload["schema_version"], "recommendation_shadow_comparison_v1")
+            self.assertEqual(comparison["baseline"]["count"], 3)
+            self.assertEqual(comparison["shadow"]["count"], 1)
+            self.assertEqual(comparison["comparison"]["replacement_suggestion_count"], 1)
+            self.assertEqual(comparison["comparison"]["cost_units"], 1)
+            self.assertEqual(comparison["feedback_alignment"]["status"], "pending_future_feedback")
             conn.close()
 
     def test_daily_run_sends_lark_profile_test_summary_after_three_recommendations(self):

@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 AGENTIC_SHADOW_SCHEMA_VERSION = "agentic_shadow_v1"
 AGENTIC_SHADOW_ROUTE = "reading.recommend.agentic_shadow_v1"
+SHADOW_COMPARISON_SCHEMA_VERSION = "recommendation_shadow_comparison_v1"
 
 
 class RecommendationAgenticShadowService:
@@ -97,7 +98,7 @@ class RecommendationAgenticShadowService:
             "trace_mode": str(shadow.get("trace_mode") or ""),
         }
         self.repo.record_cost(run_id, provider, AGENTIC_SHADOW_ROUTE, 1, metadata)
-        return self._write_artifact(
+        shadow_artifact_id = self._write_artifact(
             run_id=run_id,
             provider=provider,
             latency_ms=latency_ms,
@@ -107,6 +108,15 @@ class RecommendationAgenticShadowService:
             selected_recommendations=selected_recommendations,
             shadow=shadow,
         )
+        self._write_comparison_artifact(
+            run_id=run_id,
+            provider=provider,
+            latency_ms=latency_ms,
+            generated_candidates=generated_candidates,
+            selected_recommendations=selected_recommendations,
+            shadow=shadow,
+        )
+        return shadow_artifact_id
 
     def _write_artifact(
         self,
@@ -161,6 +171,57 @@ class RecommendationAgenticShadowService:
             },
         )
 
+    def _write_comparison_artifact(
+        self,
+        run_id: int,
+        provider: str,
+        latency_ms: int,
+        generated_candidates: list[RecommendationDraft],
+        selected_recommendations: list[RecommendationDraft],
+        shadow: dict[str, Any],
+    ) -> int:
+        now = datetime.now()
+        artifact_dir = self.library_dir / "shadow-comparisons" / f"{now:%Y}" / f"{now:%m}"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / f"{now:%Y-%m-%d}__run-{run_id}__shadow-comparison.json"
+        comparison = _build_shadow_comparison(
+            run_id=run_id,
+            provider=provider,
+            latency_ms=latency_ms,
+            generated_candidates=generated_candidates,
+            selected_recommendations=selected_recommendations,
+            shadow=shadow,
+        )
+        payload = {
+            "schema_version": SHADOW_COMPARISON_SCHEMA_VERSION,
+            "run_id": run_id,
+            "shadow_route": AGENTIC_SHADOW_ROUTE,
+            "created_at": now.isoformat(timespec="seconds"),
+            "comparison": comparison,
+        }
+        raw = json.dumps(payload, ensure_ascii=False, indent=2)
+        artifact_path.write_text(raw, encoding="utf-8")
+        sha256 = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return self.repo.add_or_update_artifact(
+            artifact_type="recommendation_shadow_comparison",
+            title=f"Recommendation shadow comparison run {run_id}",
+            path=str(artifact_path),
+            sha256=sha256,
+            content_type="application/json",
+            metadata={
+                "schema_version": SHADOW_COMPARISON_SCHEMA_VERSION,
+                "run_id": run_id,
+                "shadow_route": AGENTIC_SHADOW_ROUTE,
+                "provider": provider,
+                "baseline_count": len(selected_recommendations),
+                "shadow_count": len(shadow.get("shadow_recommendations", []))
+                if isinstance(shadow.get("shadow_recommendations"), list)
+                else 0,
+                "latency_ms": latency_ms,
+                "feedback_alignment_status": "pending_future_feedback",
+            },
+        )
+
 
 def _draft_to_payload(draft: RecommendationDraft) -> dict[str, Any]:
     return {
@@ -178,6 +239,109 @@ def _draft_to_payload(draft: RecommendationDraft) -> dict[str, Any]:
         "reading_suggestion": draft.reading_suggestion,
         "metadata": draft.metadata,
     }
+
+
+def _build_shadow_comparison(
+    run_id: int,
+    provider: str,
+    latency_ms: int,
+    generated_candidates: list[RecommendationDraft],
+    selected_recommendations: list[RecommendationDraft],
+    shadow: dict[str, Any],
+) -> dict[str, Any]:
+    shadow_recommendations = shadow.get("shadow_recommendations")
+    if not isinstance(shadow_recommendations, list):
+        shadow_recommendations = []
+    shadow_items = [item for item in shadow_recommendations if isinstance(item, dict)]
+    baseline_keys = {_book_key(draft.title, draft.author) for draft in selected_recommendations}
+    shadow_keys = {
+        _book_key(str(item.get("title", "")), str(item.get("author", "")))
+        for item in shadow_items
+        if str(item.get("title", "")).strip()
+    }
+    overlap_keys = baseline_keys.intersection(shadow_keys)
+    replacement_count = sum(1 for item in shadow_items if str(item.get("replace_baseline_title", "")).strip())
+    shadow_with_source = sum(1 for item in shadow_items if str(item.get("source_url", "")).strip())
+    baseline_assessment = shadow.get("baseline_assessment")
+    if not isinstance(baseline_assessment, dict):
+        baseline_assessment = {}
+
+    return {
+        "run_id": run_id,
+        "provider": provider,
+        "baseline": {
+            "count": len(selected_recommendations),
+            "books": [_draft_to_payload(draft) for draft in selected_recommendations],
+            "metrics": {
+                "profile_fit": _float_value(baseline_assessment.get("profile_fit"), None),
+                "novelty": _float_value(baseline_assessment.get("novelty"), None),
+                "start_path_quality": _float_value(baseline_assessment.get("start_path_quality"), None),
+                "source_validity": _float_value(baseline_assessment.get("source_validity"), None),
+            },
+            "risks": _string_list(baseline_assessment.get("risks"), 20, 500),
+        },
+        "shadow": {
+            "count": len(shadow_items),
+            "books": shadow_items[:12],
+            "metrics": {
+                "profile_fit": None,
+                "novelty_proxy": _ratio(len(shadow_keys.difference(baseline_keys)), len(shadow_keys)),
+                "start_path_quality": None,
+                "source_validity_proxy": _ratio(shadow_with_source, len(shadow_items)),
+            },
+            "subagents_used": _int_value(shadow.get("subagents_used"), 0),
+            "roles": _string_list(shadow.get("roles"), 8, 120),
+            "trace_mode": str(shadow.get("trace_mode") or ""),
+            "warnings": _string_list(shadow.get("warnings"), 20, 500),
+            "confidence": _float_value(shadow.get("confidence"), 0.0),
+        },
+        "comparison": {
+            "candidate_count": len(generated_candidates),
+            "overlap_count": len(overlap_keys),
+            "replacement_suggestion_count": replacement_count,
+            "shadow_source_url_coverage": _ratio(shadow_with_source, len(shadow_items)),
+            "latency_ms": latency_ms,
+            "cost_units": 1,
+            "agent_recommended_action": _agent_recommended_action(shadow),
+        },
+        "feedback_alignment": {
+            "status": "pending_future_feedback",
+            "baseline_book_keys": sorted(baseline_keys),
+            "shadow_book_keys": sorted(shadow_keys),
+            "note": "Alignment requires future feedback_events for the delivered baseline recommendations.",
+        },
+    }
+
+
+def _book_key(title: str, author: str) -> str:
+    return f"{title.strip().lower()}::{author.strip().lower()}"
+
+
+def _agent_recommended_action(shadow: dict[str, Any]) -> str:
+    comparison = shadow.get("comparison")
+    if not isinstance(comparison, dict):
+        return ""
+    return str(comparison.get("recommended_action") or "")[:120]
+
+
+def _string_list(raw: Any, limit: int, max_chars: int) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip()[:max_chars] for item in raw if str(item).strip()][:limit]
+
+
+def _float_value(raw: Any, default: float | None) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, value))
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(numerator / denominator, 3)
 
 
 def _env_bool(name: str, default: bool) -> bool:

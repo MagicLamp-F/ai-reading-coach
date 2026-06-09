@@ -9,6 +9,7 @@
 - 2026-06-08：已落地 daily agent runtime capability 建模。每次 `run-daily` 创建 `run_logs` 后立即将 `hermes_runtime_capabilities` 写入 `run_logs.metadata_json`，记录当前 provider/runtime 是否支持 native thread、delegation、memory、file、terminal、web、session_search 以及是否允许副作用。
 - 2026-06-08：已落地 `reading.recommend.plan_v1` hint route。Hermes adapter 支持输出 3 个推荐 slot、搜索 query、候选标准和风险控制；ARC 只把 plan 当作主题/搜索 hint，仍由 ARC 执行推荐生成、hard exclusion、source-aware ranking、落库和投递。输出写入 `recommendation_plan` artifact，本地 JSON 路径位于 `library/recommendation-plans/YYYY/MM/`。
 - 2026-06-08：已落地 `reading.recommend.agentic_shadow_v1` shadow route。默认关闭，仅在 `ARC_ENABLE_AGENTIC_SHADOW=true` 或 `ReadingCoachWorkflow(..., agentic_shadow_enabled=True)` 时启用；输出写入 `recommendation_agentic_shadow` artifact，本地 JSON 路径位于 `library/agentic-shadows/YYYY/MM/`，并记录 `subagents_used`、roles、latency、trace mode 和 warnings。
+- 2026-06-09：已落地 shadow comparison artifact。每次 agentic shadow 成功后同步写 `recommendation_shadow_comparison` artifact，本地 JSON 路径位于 `library/shadow-comparisons/YYYY/MM/`，对比 baseline 与 shadow 的 profile fit、novelty、start path、source validity、cost、latency、overlap 和替换建议。
 
 ## 1. 核心结论
 
@@ -765,10 +766,87 @@ route 执行异常或返回非 object 时只写 run warning；
 
 ### P2: Evaluation
 
-- [ ] 新增 shadow comparison artifact。
-- [ ] 对比 baseline 和 shadow 推荐。
-- [ ] 记录 profile fit、novelty、start path、source validity、cost、latency。
+- [x] 新增 shadow comparison artifact。
+- [x] 对比 baseline 和 shadow 推荐。
+- [x] 记录 profile fit、novelty、start path、source validity、cost、latency。
 - [ ] 将用户反馈与 review/shadow 判断做后验对齐。
+
+当前实现：
+
+```text
+app/recommendation_agentic_shadow.py
+  -> agentic shadow 成功后写 recommendation_agentic_shadow artifact
+  -> 同步写 recommendation_shadow_comparison artifact
+  -> comparison 完全由 ARC deterministic code 生成，不新增模型调用
+```
+
+comparison artifact 记录：
+
+```text
+baseline:
+  - 正式 selected recommendations
+  - Hermes shadow 返回的 baseline_assessment 中的 profile_fit / novelty / start_path_quality / source_validity
+
+shadow:
+  - shadow_recommendations
+  - subagents_used / roles / trace_mode / warnings / confidence
+  - novelty_proxy：shadow 中不和 baseline 重合的书占比
+  - source_validity_proxy：shadow 推荐中带 source_url 的占比
+
+comparison:
+  - generated candidate count
+  - baseline/shadow overlap count
+  - replacement suggestion count
+  - shadow source URL coverage
+  - latency_ms
+  - cost_units
+  - agent_recommended_action
+
+feedback_alignment:
+  - 当前状态为 pending_future_feedback
+  - 记录 baseline_book_keys 和 shadow_book_keys
+  - 等用户未来 feedback_events 产生后再做后验对齐
+```
+
+输出示例：
+
+```json
+{
+  "schema_version": "recommendation_shadow_comparison_v1",
+  "comparison": {
+    "baseline": {
+      "count": 3,
+      "metrics": {
+        "profile_fit": 0.8,
+        "novelty": 0.6,
+        "start_path_quality": 0.7,
+        "source_validity": 0.9
+      }
+    },
+    "shadow": {
+      "count": 1,
+      "metrics": {
+        "novelty_proxy": 1.0,
+        "source_validity_proxy": 1.0
+      }
+    },
+    "comparison": {
+      "overlap_count": 0,
+      "replacement_suggestion_count": 1,
+      "latency_ms": 123,
+      "cost_units": 1
+    },
+    "feedback_alignment": {
+      "status": "pending_future_feedback"
+    }
+  }
+}
+```
+
+功能佐证：
+
+- 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_agentic_shadow_artifact_when_enabled` 验证启用 agentic shadow 后，会同时写 `recommendation_agentic_shadow` 和 `recommendation_shadow_comparison` artifact；comparison 中包含 baseline count、shadow count、replacement suggestion count、cost units 和 `feedback_alignment.status=pending_future_feedback`。
+- 验证命令：`python3 -m py_compile app/daily_agent_adapter.py app/recommendation_agentic_shadow.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ### P3: Gating
 
