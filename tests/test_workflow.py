@@ -266,6 +266,44 @@ class RejectingReviewDailyAgent(ReviewCapableDailyAgent):
         }
 
 
+class RegeneratingReviewDailyAgent(ReviewCapableDailyAgent):
+    name = "regenerating-review-daily-agent"
+
+    def review_recommendations(
+        self,
+        profile_context,
+        recommendation_history_context,
+        themes,
+        generated_candidates,
+        selected_recommendations,
+    ):
+        super().review_recommendations(
+            profile_context=profile_context,
+            recommendation_history_context=recommendation_history_context,
+            themes=themes,
+            generated_candidates=generated_candidates,
+            selected_recommendations=selected_recommendations,
+        )
+        return {
+            "verdict": "warn",
+            "candidate_reviews": [
+                {
+                    "title": selected_recommendations[0]["title"],
+                    "author": selected_recommendations[0]["author"],
+                    "status": "replace",
+                    "reasons": ["first profile_fit slot should be regenerated with a stronger start path"],
+                    "profile_fit_score": 0.4,
+                    "fatigue_risk": "medium",
+                    "start_path_quality": "weak",
+                    "resource_type_risk": "none",
+                }
+            ],
+            "global_warnings": ["one slot needs regeneration"],
+            "revision_instructions": ["Regenerate the first profile_fit slot only."],
+            "confidence": 0.75,
+        }
+
+
 class PlanCapableDailyAgent:
     name = "plan-capable-daily-agent"
 
@@ -1161,6 +1199,55 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(decision["enforced_action"], "observe_only")
             self.assertEqual(decision["review"]["verdict"], "reject")
             self.assertEqual(decision["local_confirmations"], [])
+            conn.close()
+
+    def test_review_gating_records_regenerate_slot_request_as_observe_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            agent = RegeneratingReviewDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+                recommend_review_shadow_enabled=True,
+                review_gating_enabled=True,
+            )
+
+            run_id = workflow.run_daily_recommendations()
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_gating_decision'"
+            ).fetchone()
+            recommendation_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM recommendations WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["count"]
+
+            self.assertEqual(recommendation_count, 3)
+            self.assertIsNotNone(artifact)
+            payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            decision = payload["decision"]
+            self.assertEqual(decision["suggested_action"], "request_regenerate_slot")
+            self.assertEqual(decision["enforced_action"], "observe_only")
+            self.assertEqual(decision["review"]["verdict"], "warn")
+            self.assertEqual(len(decision["requested_actions"]), 1)
+            action = decision["requested_actions"][0]
+            self.assertEqual(action["action"], "request_regenerate_slot")
+            self.assertEqual(action["scope"], "slot")
+            self.assertEqual(action["slot_type"], "profile_fit")
+            self.assertEqual(action["title"], "Review Book 1")
             conn.close()
 
     def test_daily_run_records_warning_when_lark_profile_test_summary_fails(self):

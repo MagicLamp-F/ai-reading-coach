@@ -118,11 +118,14 @@ def _build_gating_decision(
     local_confirmations = _local_gating_confirmations(selected_recommendations, target_count)
     review_verdict = str(review.get("verdict") or "").strip().lower()
     shadow_action = _shadow_recommended_action(agentic_shadow)
+    requested_actions = _review_requested_actions(review, selected_recommendations)
     suggestions = []
     if review_verdict == "reject":
         suggestions.append("suggest_block_delivery")
     elif review_verdict == "warn":
         suggestions.append("warn_delivery")
+    if requested_actions:
+        suggestions.append("request_regenerate_slot")
     if shadow_action in {"needs_more_evidence", "suggest_block_delivery"}:
         suggestions.append("warn_delivery")
     if any(reason["severity"] == "block" for reason in local_confirmations):
@@ -130,6 +133,8 @@ def _build_gating_decision(
     suggested_action = "allow_delivery"
     if "suggest_block_delivery" in suggestions:
         suggested_action = "suggest_block_delivery"
+    elif "request_regenerate_slot" in suggestions:
+        suggested_action = "request_regenerate_slot"
     elif "warn_delivery" in suggestions:
         suggested_action = "warn_delivery"
 
@@ -155,10 +160,12 @@ def _build_gating_decision(
             "warning_count": len(agentic_shadow.get("warnings", [])) if isinstance(agentic_shadow.get("warnings"), list) else 0,
             "subagents_used": _int_value(agentic_shadow.get("subagents_used"), 0),
         },
+        "requested_actions": requested_actions,
         "local_confirmations": local_confirmations,
         "selected_recommendations": [_draft_to_payload(draft) for draft in selected_recommendations],
         "notes": [
             "Gating is observe-only unless ARC_REVIEW_GATING_ENFORCE_BLOCK=true.",
+            "request_regenerate_slot is recorded as a suggestion only; ARC does not regenerate in the current run.",
             "LLM review/shadow suggestions cannot block delivery without ARC local block confirmation.",
         ],
     }
@@ -201,6 +208,74 @@ def _shadow_recommended_action(agentic_shadow: dict[str, Any]) -> str:
     if not isinstance(comparison, dict):
         return ""
     return str(comparison.get("recommended_action") or "").strip().lower()
+
+
+def _review_requested_actions(
+    review: dict[str, Any],
+    selected_recommendations: list[RecommendationDraft],
+) -> list[dict[str, str]]:
+    selected_by_key = {_book_key(draft.title, draft.author): draft for draft in selected_recommendations}
+    actions: list[dict[str, str]] = []
+    candidate_reviews = review.get("candidate_reviews")
+    if isinstance(candidate_reviews, list):
+        for item in candidate_reviews:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "").strip().lower()
+            if status not in {"replace", "remove", "revise", "regenerate", "needs_check"}:
+                continue
+            title = str(item.get("title") or "").strip()
+            author = str(item.get("author") or "").strip()
+            selected = selected_by_key.get(_book_key(title, author))
+            reasons = item.get("reasons")
+            action = {
+                "action": "request_regenerate_slot",
+                "scope": "slot",
+                "title": title[:200],
+                "author": author[:160],
+                "slot_type": (selected.slot_type if selected is not None else str(item.get("slot_type") or ""))[:80],
+                "theme": (selected.theme if selected is not None else str(item.get("theme") or ""))[:160],
+                "reason": _action_reason(reasons, status),
+            }
+            actions.append(action)
+            if len(actions) >= 10:
+                return actions
+
+    revision_instructions = review.get("revision_instructions")
+    if isinstance(revision_instructions, list):
+        instructions = [str(item).strip()[:500] for item in revision_instructions if str(item).strip()]
+    elif str(revision_instructions or "").strip():
+        instructions = [str(revision_instructions).strip()[:500]]
+    else:
+        instructions = []
+    if instructions and not actions:
+        actions.append(
+            {
+                "action": "request_regenerate_slot",
+                "scope": "recommendation_set",
+                "title": "",
+                "author": "",
+                "slot_type": "",
+                "theme": "",
+                "reason": instructions[0],
+            }
+        )
+    return actions
+
+
+def _action_reason(raw_reasons: Any, fallback: str) -> str:
+    if isinstance(raw_reasons, list):
+        reasons = [str(reason).strip() for reason in raw_reasons if str(reason).strip()]
+        if reasons:
+            return "; ".join(reasons)[:500]
+    reason = str(raw_reasons or "").strip()
+    if reason:
+        return reason[:500]
+    return fallback
+
+
+def _book_key(title: str, author: str) -> str:
+    return f"{title.strip().lower()}::{author.strip().lower()}"
 
 
 def _draft_to_payload(draft: RecommendationDraft) -> dict[str, Any]:

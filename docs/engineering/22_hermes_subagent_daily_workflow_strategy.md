@@ -12,6 +12,7 @@
 - 2026-06-09：已落地 shadow comparison artifact。每次 agentic shadow 成功后同步写 `recommendation_shadow_comparison` artifact，本地 JSON 路径位于 `library/shadow-comparisons/YYYY/MM/`，对比 baseline 与 shadow 的 profile fit、novelty、start path、source validity、cost、latency、overlap 和替换建议。
 - 2026-06-09：已落地 shadow feedback alignment。新增 `align-shadow-feedback` CLI，可在用户反馈出现后读取历史 `recommendation_shadow_comparison` artifact 和 SQLite `feedback_events`，输出 `recommendation_shadow_feedback_alignment` artifact，本地 JSON 路径位于 `library/shadow-feedback-alignments/YYYY/MM/`。
 - 2026-06-09：已落地 P3 review gating decision artifact。默认关闭，可通过 `ARC_ENABLE_REVIEW_GATING=true` 或 `ReadingCoachWorkflow(..., review_gating_enabled=True)` 启用。当前阶段只写 `recommendation_gating_decision` artifact，本地 JSON 路径位于 `library/gating-decisions/YYYY/MM/`；不会默认拦截正式推荐入库、reading pack 或投递。
+- 2026-06-09：已落地 P3 `request_regenerate_slot` observe-only 支持。Gating 会从 `recommendation_review` 的 `candidate_reviews.status=replace/remove/revise/regenerate/needs_check` 或 `revision_instructions` 提取结构化 `requested_actions`，但当前 run 不自动重生成、不改 selected recommendations。
 
 ## 1. 核心结论
 
@@ -892,7 +893,7 @@ feedback_alignment:
 ### P3: Gating
 
 - [x] 新增 `ARC_ENABLE_REVIEW_GATING=false`。
-- [ ] 支持 `request_regenerate_slot`。
+- [x] 支持 `request_regenerate_slot`。
 - [x] 支持 `suggest_block_delivery` observe-only 决策，且 Hermes review/shadow 不能单独触发强制阻断。
 - [x] 所有 gating decision 写入 run artifact。
 
@@ -903,6 +904,7 @@ app/recommendation_gating.py
   -> RecommendationGatingService
   -> 读取同一 run 最新 recommendation_review / recommendation_agentic_shadow artifact
   -> 汇总 review verdict、agentic shadow recommended_action 和 ARC local confirmations
+  -> 提取 request_regenerate_slot requested_actions
   -> 写 recommendation_gating_decision artifact
 
 app/workflow.py
@@ -925,8 +927,23 @@ ARC_REVIEW_GATING_ENFORCE_BLOCK=false
 P3 gating 当前是 observe-only；
 默认不会阻断正式 recommendations 入库、reading pack 生成或飞书 delivery；
 review verdict=reject 只会把 suggested_action 标为 suggest_block_delivery；
+review requested regenerate 只会把 suggested_action 标为 request_regenerate_slot；
 LLM review/shadow suggestion 不能单独变成强制 block；
 未来如启用强制 block，也必须同时满足 ARC local block confirmation，例如 selected_recommendations 为空。
+```
+
+`request_regenerate_slot` 当前触发来源：
+
+```text
+recommendation_review.review.candidate_reviews[].status:
+  - replace
+  - remove
+  - revise
+  - regenerate
+  - needs_check
+
+recommendation_review.review.revision_instructions:
+  - 当没有候选级 action 时，作为 recommendation_set 级 regenerate request 记录
 ```
 
 local confirmations 当前包括：
@@ -957,6 +974,7 @@ warn:
       "artifact_present": false,
       "recommended_action": ""
     },
+    "requested_actions": [],
     "local_confirmations": []
   }
 }
@@ -966,6 +984,7 @@ warn:
 
 - 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_review_gating_decision_artifact_when_enabled` 验证启用 review shadow + gating 后，daily run 仍写 3 条正式推荐，同时写 `recommendation_gating_decision` artifact；accept verdict 会得到 `suggested_action=allow_delivery`、`enforced_action=observe_only`。
 - 单元测试 `tests.test_workflow.WorkflowTests.test_review_gating_reject_remains_observe_only_without_local_block` 验证 Hermes review 返回 `reject` 时，gating artifact 只记录 `suggested_action=suggest_block_delivery`，没有 ARC local block confirmation 时仍保持 `enforced_action=observe_only`，正式推荐仍落库 3 条。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_review_gating_records_regenerate_slot_request_as_observe_only` 验证 Hermes review 要求替换单个 `profile_fit` slot 时，gating artifact 会写 `requested_actions[].action=request_regenerate_slot`，`suggested_action=request_regenerate_slot`，但 `enforced_action=observe_only`，正式推荐仍落库 3 条。
 - 验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_gating.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
 
 ### P3: Agentic Runtime
