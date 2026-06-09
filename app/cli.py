@@ -27,6 +27,7 @@ from app.reflection import (
 )
 from app.scheduler import DailyScheduler
 from app.server import run_feedback_server
+from app.recommendation_shadow_alignment import RecommendationShadowFeedbackAlignmentService
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,10 @@ def main() -> None:
     resend.add_argument("--limit", type=int, default=20, help="Maximum pending deliveries to retry")
     resend.add_argument("--max-attempts", type=int, default=5, help="Mark a delivery failed after this many retries")
     subparsers.add_parser("run-weekly-report", help="Send one weekly profile report")
+    shadow_align = subparsers.add_parser("align-shadow-feedback", help="Align shadow comparison artifacts with later feedback")
+    shadow_align.add_argument("--days", type=int, default=30, help="Artifact lookback window in days")
+    shadow_align.add_argument("--limit", type=int, default=50, help="Maximum comparison artifacts to align")
+    shadow_align.add_argument("--library-dir", default="", help="Directory for shadow alignment artifacts")
 
     profile_sync = subparsers.add_parser("show-hermes-profile-sync", help="Show Hermes native profile sync status")
     profile_sync.add_argument("--json", action="store_true", help="Print machine-readable JSON")
@@ -174,6 +179,23 @@ def main() -> None:
     if args.command == "run-weekly-report":
         context.workflow.send_weekly_report()
         print("Weekly report sent")
+        return
+
+    if args.command == "align-shadow-feedback":
+        library_dir = Path(args.library_dir) if args.library_dir else settings.reading_pack_library_dir
+        result = RecommendationShadowFeedbackAlignmentService(context.repo, library_dir=library_dir).align_recent(
+            days=args.days,
+            limit=args.limit,
+        )
+        print(f"Shadow feedback alignment written: artifact_id={result['artifact_id']}")
+        print(
+            "Summary: "
+            f"comparisons={result['comparison_count']} "
+            f"aligned={result['aligned_count']} "
+            f"ready={result['ready_count']} "
+            f"pending={result['pending_count']} "
+            f"skipped={result['skipped_count']}"
+        )
         return
 
     if args.command == "generate-reading-pack":

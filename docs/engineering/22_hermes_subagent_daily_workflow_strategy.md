@@ -10,6 +10,7 @@
 - 2026-06-08：已落地 `reading.recommend.plan_v1` hint route。Hermes adapter 支持输出 3 个推荐 slot、搜索 query、候选标准和风险控制；ARC 只把 plan 当作主题/搜索 hint，仍由 ARC 执行推荐生成、hard exclusion、source-aware ranking、落库和投递。输出写入 `recommendation_plan` artifact，本地 JSON 路径位于 `library/recommendation-plans/YYYY/MM/`。
 - 2026-06-08：已落地 `reading.recommend.agentic_shadow_v1` shadow route。默认关闭，仅在 `ARC_ENABLE_AGENTIC_SHADOW=true` 或 `ReadingCoachWorkflow(..., agentic_shadow_enabled=True)` 时启用；输出写入 `recommendation_agentic_shadow` artifact，本地 JSON 路径位于 `library/agentic-shadows/YYYY/MM/`，并记录 `subagents_used`、roles、latency、trace mode 和 warnings。
 - 2026-06-09：已落地 shadow comparison artifact。每次 agentic shadow 成功后同步写 `recommendation_shadow_comparison` artifact，本地 JSON 路径位于 `library/shadow-comparisons/YYYY/MM/`，对比 baseline 与 shadow 的 profile fit、novelty、start path、source validity、cost、latency、overlap 和替换建议。
+- 2026-06-09：已落地 shadow feedback alignment。新增 `align-shadow-feedback` CLI，可在用户反馈出现后读取历史 `recommendation_shadow_comparison` artifact 和 SQLite `feedback_events`，输出 `recommendation_shadow_feedback_alignment` artifact，本地 JSON 路径位于 `library/shadow-feedback-alignments/YYYY/MM/`。
 
 ## 1. 核心结论
 
@@ -769,7 +770,7 @@ route 执行异常或返回非 object 时只写 run warning；
 - [x] 新增 shadow comparison artifact。
 - [x] 对比 baseline 和 shadow 推荐。
 - [x] 记录 profile fit、novelty、start path、source validity、cost、latency。
-- [ ] 将用户反馈与 review/shadow 判断做后验对齐。
+- [x] 将用户反馈与 review/shadow 判断做后验对齐。
 
 当前实现：
 
@@ -803,9 +804,9 @@ comparison:
   - agent_recommended_action
 
 feedback_alignment:
-  - 当前状态为 pending_future_feedback
+  - comparison 初始状态为 pending_future_feedback
   - 记录 baseline_book_keys 和 shadow_book_keys
-  - 等用户未来 feedback_events 产生后再做后验对齐
+  - align-shadow-feedback 会在未来 feedback_events 产生后输出后验对齐 artifact
 ```
 
 输出示例：
@@ -846,7 +847,46 @@ feedback_alignment:
 功能佐证：
 
 - 单元测试 `tests.test_workflow.WorkflowTests.test_daily_run_writes_agentic_shadow_artifact_when_enabled` 验证启用 agentic shadow 后，会同时写 `recommendation_agentic_shadow` 和 `recommendation_shadow_comparison` artifact；comparison 中包含 baseline count、shadow count、replacement suggestion count、cost units 和 `feedback_alignment.status=pending_future_feedback`。
-- 验证命令：`python3 -m py_compile app/daily_agent_adapter.py app/recommendation_agentic_shadow.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
+- 单元测试 `tests.test_workflow.WorkflowTests.test_shadow_feedback_alignment_uses_later_baseline_feedback` 验证在正式推荐产生用户反馈后，`RecommendationShadowFeedbackAlignmentService.align_recent()` 会输出 `recommendation_shadow_feedback_alignment` artifact，并把 baseline outcome 标记为 positive/ready。
+- 验证命令：`python3 -m py_compile app/cli.py app/daily_agent_adapter.py app/recommendation_agentic_shadow.py app/recommendation_shadow_alignment.py app/recommendation_plan.py app/recommendation_review.py app/recommendation_explainability.py app/workflow.py app/repository.py && python3 -m unittest tests.test_daily_agent_adapter tests.test_workflow -q`。
+
+后验对齐命令：
+
+```bash
+python3 -m app.cli align-shadow-feedback --days 30 --limit 50
+```
+
+当前实现：
+
+```text
+app/recommendation_shadow_alignment.py
+  -> RecommendationShadowFeedbackAlignmentService
+  -> 读取 recommendation_shadow_comparison artifact
+  -> 查询同一 run 的 delivered baseline recommendation feedback
+  -> 查询 shadow book keys 的历史反馈
+  -> 输出 recommendation_shadow_feedback_alignment artifact
+
+app/cli.py
+  -> align-shadow-feedback
+  -> 支持 --days / --limit / --library-dir
+```
+
+alignment artifact 记录：
+
+```text
+baseline:
+  - delivered recommendation 的 direct feedback
+  - positive / negative / neutral / outcome
+  - feedback type 和 reason code 分布
+
+shadow:
+  - shadow book keys 的历史反馈
+  - 注意：除非 shadow 书也曾正式投递，否则这是 title/author 维度的间接反馈
+
+feedback_alignment:
+  - ready：已有 baseline feedback，可做后验判断
+  - pending_future_feedback：还没有正式推荐反馈
+```
 
 ### P3: Gating
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.db import connect, init_db
 from app.memory import HermesNativeProfileProvider
+from app.recommendation_shadow_alignment import RecommendationShadowFeedbackAlignmentService
 from app.repository import BookSourceDraft, RecommendationDraft, Repository
 from app.workflow import FALLBACK_BOOKS
 from app.workflow import ReadingCoachWorkflow
@@ -635,6 +636,54 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(comparison["comparison"]["replacement_suggestion_count"], 1)
             self.assertEqual(comparison["comparison"]["cost_units"], 1)
             self.assertEqual(comparison["feedback_alignment"]["status"], "pending_future_feedback")
+            conn.close()
+
+    def test_shadow_feedback_alignment_uses_later_baseline_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            agent = AgenticShadowDailyAgent()
+            workflow = ReadingCoachWorkflow(
+                repo=repo,
+                search=EmptySearch(),
+                llm=NoApiLLM(),
+                lark=DisabledLark(),
+                telegram=DisabledTelegram(),
+                channel="lark",
+                public_base_url="http://localhost:8000",
+                feedback_secret="secret",
+                max_search_calls=3,
+                max_model_calls=2,
+                reading_pack_library_dir=tmp_path / "library",
+                daily_recommendation_agent=agent,
+                agentic_shadow_enabled=True,
+            )
+            run_id = workflow.run_daily_recommendations()
+            recommendation = conn.execute(
+                "SELECT * FROM recommendations WHERE run_id = ? ORDER BY id LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            repo.add_feedback(int(recommendation["id"]), "like", reason_code="topic_matches")
+
+            result = RecommendationShadowFeedbackAlignmentService(
+                repo,
+                library_dir=tmp_path / "library",
+            ).align_recent(days=30, limit=10)
+
+            artifact = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_type = 'recommendation_shadow_feedback_alignment'"
+            ).fetchone()
+            self.assertIsNotNone(artifact)
+            self.assertEqual(result["ready_count"], 1)
+            payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            alignment = payload["alignments"][0]
+            self.assertEqual(payload["schema_version"], "recommendation_shadow_feedback_alignment_v1")
+            self.assertEqual(alignment["run_id"], run_id)
+            self.assertEqual(alignment["feedback_alignment"]["status"], "ready")
+            self.assertEqual(alignment["baseline"]["feedback"]["positive"], 1)
+            self.assertEqual(alignment["baseline"]["feedback"]["outcome"], "positive")
             conn.close()
 
     def test_daily_run_sends_lark_profile_test_summary_after_three_recommendations(self):
