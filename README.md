@@ -149,6 +149,7 @@ python3 -m app.cli run-server --host 127.0.0.1 --port 8002
 python3 -m app.cli run-api --host 127.0.0.1 --port 8000
 python3 -m app.cli show-hermes-profile-sync --json
 python3 -m app.cli generate-reading-pack --recommendation-id <id>
+python3 -m app.cli ingest-reading-quotes --limit 12
 python3 -m app.cli run-weekly-report
 python3 -m app.cli generate-reflection --days 7
 python3 -m app.cli list-reflections
@@ -191,6 +192,8 @@ python3 -m app.cli run-scheduler
 - `feedback_events`：飞书反馈链接或 Telegram 按钮反馈，含反馈类型、原因和自由文本。
 - `hermes_profile_update_events`：Hermes feedback ingest 审计，记录画像更新决策、证据摘要、状态和错误。
 - `reading_packs`：深度读书包结构化内容和生成状态。
+- `reading_quotes`：从快读包保存的摘抄，关联推荐、作品、模块和画像 ingest 状态。
+- `hermes_quote_profile_update_events`：Hermes quote ingest 审计，记录摘抄批量画像写回决策、偏好摘要和错误。
 - `artifacts`：Markdown/HTML 等生成物元数据。
 - `run_logs`：任务运行日志。
 - `cost_logs`：模型和搜索调用记录。
@@ -205,6 +208,7 @@ python3 -m app.cli run-scheduler
 6. 再次 `run-daily` 前会处理未回写反馈，调用 Hermes `reading.feedback.ingest`，写入 `hermes_profile_update_events`，并更新 `profile_items`。
 7. `run-weekly-report` 能发送画像复盘，包含反馈分布、原因分布、画像变化、可能误解和下周建议。
 8. `/admin/profile-evidence` 能显示画像条目的证据链；点击“确认 / 不准确 / 降权”后会写入 `profile_item_review_events`，并相应调整本地画像权重和置信度。
+9. `ingest-reading-quotes` 能把 pending/failed 摘抄批量交给 Hermes `reading.quote.ingest`，写入 `hermes_quote_profile_update_events`，并按 applied/skipped/failed 标记 `reading_quotes.profile_ingest_status`。
 
 ## 文档
 

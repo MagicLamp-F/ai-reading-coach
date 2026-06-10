@@ -17,6 +17,7 @@ from app.metrics import MetricsServer
 from app.memory import hermes_profile_sync_status
 from app.poller import TelegramPoller
 from app.profile import seed_user_manual
+from app.quote_ingest import HermesQuoteProfileIngestor, QuoteProfileIngestService
 from app.reading_pack import FastReadPackService
 from app.reflection import (
     HermesReflectionService,
@@ -47,6 +48,8 @@ def main() -> None:
     resend.add_argument("--limit", type=int, default=20, help="Maximum pending deliveries to retry")
     resend.add_argument("--max-attempts", type=int, default=5, help="Mark a delivery failed after this many retries")
     subparsers.add_parser("run-weekly-report", help="Send one weekly profile report")
+    quote_ingest = subparsers.add_parser("ingest-reading-quotes", help="Summarize saved reading quotes into Hermes native profile")
+    quote_ingest.add_argument("--limit", type=int, default=12, help="Maximum pending quotes to ingest in one batch")
     shadow_align = subparsers.add_parser("align-shadow-feedback", help="Align shadow comparison artifacts with later feedback")
     shadow_align.add_argument("--days", type=int, default=30, help="Artifact lookback window in days")
     shadow_align.add_argument("--limit", type=int, default=50, help="Maximum comparison artifacts to align")
@@ -179,6 +182,23 @@ def main() -> None:
     if args.command == "run-weekly-report":
         context.workflow.send_weekly_report()
         print("Weekly report sent")
+        return
+
+    if args.command == "ingest-reading-quotes":
+        service = QuoteProfileIngestService(
+            context.repo,
+            HermesQuoteProfileIngestor(
+                command=settings.hermes_agent_command,
+                timeout_seconds=settings.hermes_agent_timeout_seconds,
+                native_user_memory_path=settings.hermes_native_user_memory_path,
+                native_user_memory_char_limit=settings.hermes_native_user_memory_char_limit,
+            ),
+        )
+        result = service.ingest_pending(limit=args.limit)
+        print(
+            "Reading quote ingest completed: "
+            f"status={result.status} quote_count={result.quote_count} event_id={result.event_id or ''}"
+        )
         return
 
     if args.command == "align-shadow-feedback":

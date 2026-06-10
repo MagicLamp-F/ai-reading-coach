@@ -166,6 +166,22 @@ class HermesProfileUpdateEventDraft:
     route: str = "reading.feedback.ingest"
 
 
+@dataclass(frozen=True)
+class HermesQuoteProfileUpdateEventDraft:
+    quote_ids: list[int]
+    status: str
+    should_update_native_memory: bool
+    native_memory_path: str
+    memory_entry: str
+    rationale: str
+    confidence: float
+    evidence_summary: str
+    preference_summary: dict[str, Any]
+    error_message: str
+    raw_response: dict[str, Any]
+    route: str = "reading.quote.ingest"
+
+
 class Repository:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -1298,6 +1314,76 @@ class Repository:
             )
         )
 
+    def pending_quote_profile_ingest_batch(self, limit: int = 12) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT
+                    rq.*,
+                    b.title AS book_title,
+                    b.author AS book_author,
+                    r.theme,
+                    r.slot_type,
+                    r.profile_mapping,
+                    r.system_hypothesis
+                FROM reading_quotes rq
+                JOIN books b ON b.id = rq.book_id
+                JOIN recommendations r ON r.id = rq.recommendation_id
+                WHERE rq.profile_ingest_status IN ('pending', 'failed')
+                ORDER BY rq.created_at ASC, rq.id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+
+    def record_hermes_quote_profile_update_event(self, draft: HermesQuoteProfileUpdateEventDraft) -> int:
+        quote_ids = [int(quote_id) for quote_id in draft.quote_ids]
+        cur = self.conn.execute(
+            """
+            INSERT INTO hermes_quote_profile_update_events(
+                route, status, quote_ids_json, quote_count, should_update_native_memory,
+                native_memory_path, memory_entry, rationale, confidence,
+                evidence_summary, preference_summary_json, error_message, raw_response_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.route,
+                draft.status,
+                json.dumps(quote_ids, ensure_ascii=False),
+                len(quote_ids),
+                1 if draft.should_update_native_memory else 0,
+                draft.native_memory_path,
+                draft.memory_entry,
+                draft.rationale,
+                _clamp(draft.confidence),
+                draft.evidence_summary,
+                json.dumps(draft.preference_summary, ensure_ascii=False),
+                draft.error_message,
+                json.dumps(draft.raw_response, ensure_ascii=False),
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def mark_reading_quotes_profile_ingested(self, quote_ids: list[int], status: str) -> None:
+        if status not in {"applied", "skipped", "failed"}:
+            raise ValueError("Unsupported reading quote profile ingest status")
+        clean_ids = [int(quote_id) for quote_id in quote_ids]
+        if not clean_ids:
+            return
+        placeholders = ",".join("?" for _ in clean_ids)
+        self.conn.execute(
+            f"""
+            UPDATE reading_quotes
+            SET profile_ingest_status = ?,
+                profile_ingested_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """,
+            (status, *clean_ids),
+        )
+
     def add_recommendation_candidate(self, draft: RecommendationCandidateDraft) -> int:
         cur = self.conn.execute(
             """
@@ -1403,6 +1489,19 @@ class Repository:
                 (limit,),
             )
         )
+
+    def latest_reading_pack_for_recommendation(self, recommendation_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT rp.*, a.path AS artifact_path
+            FROM reading_packs rp
+            LEFT JOIN artifacts a ON a.id = rp.artifact_id
+            WHERE rp.recommendation_id = ?
+            ORDER BY rp.created_at DESC, rp.id DESC
+            LIMIT 1
+            """,
+            (recommendation_id,),
+        ).fetchone()
 
     def reflection_profile_items(self, limit: int = 80) -> list[sqlite3.Row]:
         return list(

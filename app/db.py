@@ -209,12 +209,32 @@ def init_db(conn: sqlite3.Connection) -> None:
             module TEXT NOT NULL DEFAULT '',
             section_title TEXT NOT NULL DEFAULT '',
             source_surface TEXT NOT NULL DEFAULT 'reading_pack',
+            profile_ingest_status TEXT NOT NULL DEFAULT 'pending' CHECK(profile_ingest_status IN ('pending', 'applied', 'skipped', 'failed')),
+            profile_ingested_at TEXT,
             metadata_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(reading_pack_id) REFERENCES reading_packs(id) ON DELETE CASCADE,
             FOREIGN KEY(recommendation_id) REFERENCES recommendations(id) ON DELETE CASCADE,
             FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS hermes_quote_profile_update_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            route TEXT NOT NULL DEFAULT 'reading.quote.ingest',
+            status TEXT NOT NULL CHECK(status IN ('applied', 'skipped', 'failed')),
+            quote_ids_json TEXT NOT NULL DEFAULT '[]',
+            quote_count INTEGER NOT NULL DEFAULT 0,
+            should_update_native_memory INTEGER NOT NULL DEFAULT 0,
+            native_memory_path TEXT NOT NULL DEFAULT '',
+            memory_entry TEXT NOT NULL DEFAULT '',
+            rationale TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            evidence_summary TEXT NOT NULL DEFAULT '',
+            preference_summary_json TEXT NOT NULL DEFAULT '{}',
+            error_message TEXT NOT NULL DEFAULT '',
+            raw_response_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS recommendation_candidates (
@@ -354,6 +374,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_reading_pack_sources_source ON reading_pack_sources(book_source_id);
         CREATE INDEX IF NOT EXISTS idx_reading_quotes_pack_created ON reading_quotes(reading_pack_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_reading_quotes_book_created ON reading_quotes(book_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_hermes_quote_profile_update_status ON hermes_quote_profile_update_events(status, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_recommendation_candidates_run_score ON recommendation_candidates(run_id, final_score DESC);
         CREATE INDEX IF NOT EXISTS idx_recommendation_candidates_status ON recommendation_candidates(status, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_delivery_outbox_pending ON delivery_outbox(status, next_attempt_at, id);
@@ -370,6 +391,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "feedback_events", "reason_code", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "run_logs", "warning_message", "TEXT")
     _ensure_column(conn, "reading_plans", "lark_push_enabled", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "reading_quotes", "profile_ingest_status", "TEXT NOT NULL DEFAULT 'pending'")
+    _ensure_column(conn, "reading_quotes", "profile_ingested_at", "TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reading_quotes_profile_ingest ON reading_quotes(profile_ingest_status, created_at ASC, id ASC)"
+    )
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

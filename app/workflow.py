@@ -29,7 +29,7 @@ from app.recommendation_fact_check import RecommendationFactCheckService
 from app.recommendation_gating import RecommendationGatingService
 from app.recommendation_plan import RecommendationPlanService
 from app.recommendation_review import RecommendationReviewShadowService
-from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview
+from app.reading_pack import FastReadPackService, HermesReadingPackAdapter, ReadingPackPreview, build_reading_pack_preview
 from app.repository import DeliveryOutboxDraft, RecommendationCandidateDraft, RecommendationDraft, Repository
 from app.search import SearchResult, TavilySearch
 from app.source_collector import (
@@ -434,7 +434,8 @@ class ReadingCoachWorkflow:
             metadata = _json_loads(str(delivery["metadata_json"] or "{}"), {})
             index = int(metadata.get("index") or 1) if isinstance(metadata, dict) else 1
             total = int(metadata.get("total") or 1) if isinstance(metadata, dict) else 1
-            message_id = self._send_recommendation(index, total, int(recommendation_id), draft, None)
+            reading_pack_preview = self._reading_pack_preview_for_recommendation(int(recommendation_id))
+            message_id = self._send_recommendation(index, total, int(recommendation_id), draft, reading_pack_preview)
             if message_id is not None:
                 if message_id:
                     self.repo.set_recommendation_message_id(int(recommendation_id), message_id)
@@ -504,6 +505,10 @@ class ReadingCoachWorkflow:
                 agent=self.reading_pack_agent,
                 source_collector=self.source_collector,
             ).generate_for_recommendation(recommendation_id)
+            if result.status == "fallback" and result.error_message:
+                warning = f"reading pack generation fallback: recommendation_id={recommendation_id}: {result.error_message}"
+                logger.warning(warning)
+                self.repo.record_run_warning(run_id, warning)
             return replace(
                 result.preview,
                 reading_pack_url=build_reading_pack_url(
@@ -517,6 +522,24 @@ class ReadingCoachWorkflow:
             logger.warning(warning)
             self.repo.record_run_warning(run_id, warning)
             return None
+
+    def _reading_pack_preview_for_recommendation(self, recommendation_id: int) -> ReadingPackPreview | None:
+        row = self.repo.latest_reading_pack_for_recommendation(recommendation_id)
+        if row is None:
+            return None
+        content = _json_loads(str(row["content_json"] or "{}"), {})
+        if not isinstance(content, dict):
+            return None
+        artifact_path = Path(str(row["artifact_path"] or ""))
+        preview = build_reading_pack_preview(content, artifact_path, str(row["status"] or "generated"))
+        return replace(
+            preview,
+            reading_pack_url=build_reading_pack_url(
+                self.public_base_url,
+                int(row["id"]),
+                self.feedback_secret,
+            ),
+        )
 
     def _send_reading_pack_preview(
         self,

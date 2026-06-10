@@ -82,6 +82,8 @@ class DatabaseMigrationTests(unittest.TestCase):
             link_columns = {row["name"] for row in conn.execute("PRAGMA table_info(reading_pack_sources)")}
             quote_columns = {row["name"] for row in conn.execute("PRAGMA table_info(reading_quotes)")}
             quote_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(reading_quotes)")}
+            quote_audit_columns = {row["name"] for row in conn.execute("PRAGMA table_info(hermes_quote_profile_update_events)")}
+            quote_audit_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(hermes_quote_profile_update_events)")}
             candidate_columns = {row["name"] for row in conn.execute("PRAGMA table_info(recommendation_candidates)")}
             outbox_columns = {row["name"] for row in conn.execute("PRAGMA table_info(delivery_outbox)")}
             conn.close()
@@ -97,12 +99,49 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("book_source_id", link_columns)
         self.assertIn("selected_text", quote_columns)
         self.assertIn("section_title", quote_columns)
+        self.assertIn("profile_ingest_status", quote_columns)
+        self.assertIn("profile_ingested_at", quote_columns)
         self.assertIn("idx_reading_quotes_pack_created", quote_indexes)
+        self.assertIn("idx_reading_quotes_profile_ingest", quote_indexes)
+        self.assertIn("quote_ids_json", quote_audit_columns)
+        self.assertIn("preference_summary_json", quote_audit_columns)
+        self.assertIn("idx_hermes_quote_profile_update_status", quote_audit_indexes)
         self.assertIn("source_coverage_score", candidate_columns)
         self.assertIn("reject_reason", candidate_columns)
         self.assertIn("message_type", outbox_columns)
         self.assertIn("next_attempt_at", outbox_columns)
         self.assertIn("attempt_count", outbox_columns)
+
+    def test_init_db_adds_quote_ingest_columns_to_existing_reading_quotes_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            conn.executescript(
+                """
+                CREATE TABLE reading_quotes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    reading_pack_id INTEGER NOT NULL,
+                    recommendation_id INTEGER NOT NULL,
+                    book_id INTEGER NOT NULL,
+                    selected_text TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    module TEXT NOT NULL DEFAULT '',
+                    section_title TEXT NOT NULL DEFAULT '',
+                    source_surface TEXT NOT NULL DEFAULT 'reading_pack',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+
+            init_db(conn)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(reading_quotes)")}
+            indexes = {row["name"] for row in conn.execute("PRAGMA index_list(reading_quotes)")}
+            conn.close()
+
+        self.assertIn("profile_ingest_status", columns)
+        self.assertIn("profile_ingested_at", columns)
+        self.assertIn("idx_reading_quotes_profile_ingest", indexes)
 
     def test_init_db_creates_hermes_profile_update_audit_table(self):
         with tempfile.TemporaryDirectory() as tmp:

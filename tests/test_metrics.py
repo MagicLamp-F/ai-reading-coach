@@ -5,7 +5,7 @@ from pathlib import Path
 from app.db import connect, init_db
 from app.memory import HermesNativeProfileProvider
 from app.metrics import _render_metrics
-from app.repository import HermesProfileUpdateEventDraft, Repository
+from app.repository import HermesProfileUpdateEventDraft, HermesQuoteProfileUpdateEventDraft, Repository
 
 
 class MetricsTests(unittest.TestCase):
@@ -52,6 +52,34 @@ class MetricsTests(unittest.TestCase):
 
         self.assertIn("reading_coach_hermes_profile_updates_total", metrics)
         self.assertIn('reading_coach_hermes_profile_updates_total{status="applied"} 1', metrics)
+
+    def test_metrics_include_hermes_quote_profile_update_status_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = connect(root / "test.db")
+            init_db(conn)
+            repo = Repository(conn)
+            repo.record_hermes_quote_profile_update_event(
+                HermesQuoteProfileUpdateEventDraft(
+                    quote_ids=[1, 2],
+                    status="skipped",
+                    should_update_native_memory=False,
+                    native_memory_path="",
+                    memory_entry="",
+                    rationale="weak batch",
+                    confidence=0.2,
+                    evidence_summary="two weak quotes",
+                    preference_summary={"open_questions": ["need more"]},
+                    error_message="",
+                    raw_response={"should_update_native_memory": False},
+                )
+            )
+
+            metrics = _render_metrics(repo)
+            conn.close()
+
+        self.assertIn("reading_coach_hermes_quote_profile_updates_total", metrics)
+        self.assertIn('reading_coach_hermes_quote_profile_updates_total{status="skipped"} 1', metrics)
 
 
 def _add_recommendation(repo: Repository) -> int:

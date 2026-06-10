@@ -559,19 +559,88 @@ quote submission
 -> Hermes recommendation/generation routes can use it
 ```
 
-Hermes 目前不会在摘抄提交当下启动独立 native 子 agent，也不会直接改写 Hermes USER memory。这样做的原因是摘抄属于高频小信号，先进入 ARC 事实账本和结构化画像，避免把未聚合的碎片直接写入长期主画像。
+Hermes 不会在摘抄提交当下直接改写 Hermes USER memory。这样做的原因是摘抄属于高频小信号，先进入 ARC 事实账本和结构化画像，避免把未聚合的碎片直接写入长期主画像。
 
-### 8.5 后续可扩展方式
+### 8.5 Quote Ingest 聚合写回
+
+2026-06-10 新增 `reading.quote.ingest` 小流程。它把多条待处理摘抄批量交给 Hermes 总结，再由 ARC 决定是否受控写回 Hermes native USER memory。
+
+运行命令：
+
+```bash
+python3 -m app.cli ingest-reading-quotes --limit 12
+```
+
+自动运行：
+
+```text
+deploy/systemd/ai-reading-coach-quote-ingest.service
+deploy/systemd/ai-reading-coach-quote-ingest.timer
+```
+
+默认每天 23:20 执行一次，每批最多处理 12 条 pending/failed 摘抄。
+
+数据链路：
+
+```text
+reading_quotes(profile_ingest_status in pending|failed)
+-> Hermes route reading.quote.ingest
+-> output_schema quote_profile_update_v1
+-> ARC writes hermes_quote_profile_update_events
+-> ARC marks reading_quotes.profile_ingest_status = applied|skipped|failed
+-> if Hermes says should_update_native_memory=true:
+   ARC upserts [arc-reading-profile] entry in Hermes native USER.md
+```
+
+Hermes payload 里包含：
+
+- 当前 Hermes native `[arc-reading-profile]`
+- quote batch：摘抄文本、用户 note、作品、作者、模块、小节、推荐主题、画像映射和 system hypothesis
+- 明确约束：Hermes 不写 SQLite、不发消息、不改 memory，只返回 JSON 决策
+
+审计表：
+
+```text
+hermes_quote_profile_update_events
+```
+
+核心字段：
+
+- `quote_ids_json`
+- `quote_count`
+- `status = applied|skipped|failed`
+- `should_update_native_memory`
+- `memory_entry`
+- `rationale`
+- `confidence`
+- `evidence_summary`
+- `preference_summary_json`
+- `raw_response_json`
+- `error_message`
+
+可观测性：
+
+```text
+reading_coach_hermes_quote_profile_updates_total{status="applied|skipped|failed"}
+```
+
+当前策略：
+
+- 不接入 `run-daily` 主链路，避免摘抄画像写回拖慢或阻断每日推荐。
+- 可手动运行，也可通过 `ai-reading-coach-quote-ingest.timer` 自动运行。
+- `failed` 摘抄不会丢弃，下次仍会被批处理重试。
+- 单条孤立摘抄应由 Hermes 返回 skipped，只有批量重复偏好或明确 note 才应写 native USER memory。
+
+### 8.6 后续可扩展方式
 
 建议按这个顺序演进：
 
-1. `quote.ingest` 小流程：定期把最近摘抄交给 Hermes，总结句式、主题、情绪和审美偏好，再写回 Hermes native USER memory。
-2. 作品级摘抄页：在书籍详情或推荐历史里展示“这本书我摘抄过什么”。
-3. 摘抄复习队列：按时间间隔或主题，把旧摘抄推回飞书，形成复读和回味机制。
-4. 相似句偏好推荐：推荐时不仅看主题和类型，也看语言风格、叙事密度、抽象程度和情绪温度。
-5. Hermes 子角色拆分：让候选研究员关注“作品是否有可摘抄密度”，让审稿人检查推荐理由是否匹配用户保存过的句子偏好，让事实核验员确认摘抄是否来自原著或可靠来源。
+1. 作品级摘抄页：在书籍详情或推荐历史里展示“这本书我摘抄过什么”。
+2. 摘抄复习队列：按时间间隔或主题，把旧摘抄推回飞书，形成复读和回味机制。
+3. 相似句偏好推荐：推荐时不仅看主题和类型，也看语言风格、叙事密度、抽象程度和情绪温度。
+4. Hermes 子角色拆分：让候选研究员关注“作品是否有可摘抄密度”，让审稿人检查推荐理由是否匹配用户保存过的句子偏好，让事实核验员确认摘抄是否来自原著或可靠来源。
 
-### 8.6 布局修复
+### 8.7 布局修复
 
 传统服务端快读包页修复了桌面端“下一节”分页和反馈区重叠问题：
 

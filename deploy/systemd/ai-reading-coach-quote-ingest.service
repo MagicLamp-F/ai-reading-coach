@@ -1,0 +1,11 @@
+[Unit]
+Description=AI Reading Coach reading quote profile ingest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/projects/ai-reading-coach
+EnvironmentFile=/home/ubuntu/projects/ai-reading-coach/.env
+ExecStart=/usr/bin/python3 -m app.cli ingest-reading-quotes --limit 12

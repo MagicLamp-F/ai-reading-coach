@@ -1108,7 +1108,8 @@ class WorkflowTests(unittest.TestCase):
 
     def test_resend_pending_deliveries_sends_queued_recommendation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            conn = connect(Path(tmp) / "test.db")
+            tmp_path = Path(tmp)
+            conn = connect(tmp_path / "test.db")
             init_db(conn)
             repo = Repository(conn)
             lark = RecoveringRecommendationLark()
@@ -1124,6 +1125,9 @@ class WorkflowTests(unittest.TestCase):
                 max_search_calls=3,
                 max_model_calls=2,
                 daily_recommendation_count=1,
+                memory_dir=tmp_path / "memory",
+                reading_packs_enabled=True,
+                reading_pack_library_dir=tmp_path / "library",
             )
             run_id = workflow.run_daily_recommendations()
             conn.execute("UPDATE delivery_outbox SET next_attempt_at = CURRENT_TIMESTAMP")
@@ -1136,6 +1140,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(sent, 1)
             self.assertEqual(recommendation["message_id"], "resent-1")
             self.assertEqual(outbox["status"], "sent")
+            self.assertEqual(len(lark.reading_pack_previews), 2)
+            self.assertIsNotNone(lark.reading_pack_previews[0])
+            self.assertIsNotNone(lark.reading_pack_previews[1])
+            self.assertIn("/reading-pack?id=", lark.reading_pack_previews[1].reading_pack_url)
             conn.close()
 
     def test_daily_run_treats_empty_lark_profile_summary_message_id_as_success(self):
@@ -1235,16 +1243,18 @@ class WorkflowTests(unittest.TestCase):
 
             run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
             recommendation = conn.execute("SELECT * FROM recommendations WHERE run_id = ?", (run["id"],)).fetchone()
-            pack_count = conn.execute("SELECT COUNT(*) AS count FROM reading_packs").fetchone()["count"]
+            pack = conn.execute("SELECT * FROM reading_packs WHERE recommendation_id = ?", (recommendation["id"],)).fetchone()
             self.assertEqual(run["status"], "success")
             self.assertIsNone(run["error_message"])
             self.assertIn("reading pack unavailable", run["warning_message"])
             self.assertIsNotNone(recommendation)
             self.assertEqual(recommendation["message_id"], "rec-1")
             self.assertEqual(len(lark.reading_pack_previews), 1)
-            self.assertIsNone(lark.reading_pack_previews[0])
+            self.assertIsNotNone(lark.reading_pack_previews[0])
+            self.assertIn("/reading-pack?id=", lark.reading_pack_previews[0].reading_pack_url)
             self.assertEqual(len(lark.sent_reading_pack_previews), 0)
-            self.assertEqual(pack_count, 0)
+            self.assertIsNotNone(pack)
+            self.assertEqual(pack["status"], "fallback")
             conn.close()
 
     def test_daily_run_source_aware_selects_only_source_qualified_candidates(self):

@@ -277,6 +277,7 @@ class ReadingPackResult:
     status: str
     summary: str
     preview: ReadingPackPreview
+    error_message: str | None = None
 
 
 class FastReadPackService:
@@ -354,12 +355,17 @@ class FastReadPackService:
             status=status,
             summary=str(content.get("one_sentence_thesis", "")),
             preview=build_reading_pack_preview(content, artifact_path, status),
+            error_message=error_message,
         )
 
     def _generate_content(self, recommendation, sources: list[Any]) -> tuple[dict[str, Any], str, str | None]:
         prompt_context = self._prompt_context(recommendation, sources)
         if self.agent is not None:
-            response = self.agent.generate_pack(prompt_context)
+            try:
+                response = self.agent.generate_pack(prompt_context)
+            except Exception as exc:
+                logger.exception("Hermes deep read pack generation failed; using fallback pack")
+                return self._fallback_content(recommendation, sources), "fallback", str(exc)
             return _attach_source_refs(normalize_fast_read_pack(response, recommendation), sources), "generated", None
         try:
             response = self.llm.complete_json(

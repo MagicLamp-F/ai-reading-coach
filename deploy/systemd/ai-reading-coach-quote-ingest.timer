@@ -1,0 +1,10 @@
+[Unit]
+Description=Run AI Reading Coach reading quote profile ingest daily
+
+[Timer]
+OnCalendar=*-*-* 23:20:00
+Persistent=true
+Unit=ai-reading-coach-quote-ingest.service
+
+[Install]
+WantedBy=timers.target

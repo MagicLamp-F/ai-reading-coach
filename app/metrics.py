@@ -45,6 +45,9 @@ def _render_metrics(repo: Repository) -> str:
     hermes_profile_update_rows = conn.execute(
         "SELECT status, COUNT(*) AS count FROM hermes_profile_update_events GROUP BY status"
     ).fetchall()
+    hermes_quote_profile_update_rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM hermes_quote_profile_update_events GROUP BY status"
+    ).fetchall()
     profile_count = conn.execute("SELECT COUNT(*) AS count FROM profile_items").fetchone()["count"]
     native_profile_loads = hermes_native_profile_load_metrics()
     lines = [
@@ -84,5 +87,15 @@ def _render_metrics(repo: Repository) -> str:
     lines.extend(
         f'reading_coach_hermes_profile_updates_total{{status="{row["status"]}"}} {row["count"]}'
         for row in hermes_profile_update_rows
+    )
+    lines.extend(
+        [
+            "# HELP reading_coach_hermes_quote_profile_updates_total Hermes native profile quote-ingest decisions by status.",
+            "# TYPE reading_coach_hermes_quote_profile_updates_total counter",
+        ]
+    )
+    lines.extend(
+        f'reading_coach_hermes_quote_profile_updates_total{{status="{row["status"]}"}} {row["count"]}'
+        for row in hermes_quote_profile_update_rows
     )
     return "\n".join(lines) + "\n"
