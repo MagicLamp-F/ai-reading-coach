@@ -57,6 +57,24 @@ def reading_pack_payload(row: Row, token: str, module: str, feedback_secret: str
         "progress_percent": round(((current_index + 1) / len(READING_PACK_MODULES)) * 100, 1),
         "sections": sections,
         "feedback_options": _feedback_options(int(row["recommendation_id"]), feedback_secret),
+        "quotes": [],
+    }
+
+
+def reading_quote_payload(row: Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "reading_pack_id": int(row["reading_pack_id"]),
+        "recommendation_id": int(row["recommendation_id"]),
+        "book_id": int(row["book_id"]),
+        "book": {"title": row["book_title"], "author": row["book_author"] or ""},
+        "reading_pack_title": row["reading_pack_title"] if "reading_pack_title" in row.keys() else "",
+        "selected_text": row["selected_text"],
+        "note": row["note"] or "",
+        "module": row["module"] or "",
+        "section_title": row["section_title"] or "",
+        "source_surface": row["source_surface"] or "",
+        "created_at": row["created_at"],
     }
 
 

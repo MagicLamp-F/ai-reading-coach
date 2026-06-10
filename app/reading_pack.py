@@ -377,13 +377,13 @@ class FastReadPackService:
 
     def _sources_for_recommendation(self, recommendation) -> list[Any]:
         book_id = int(recommendation["book_id"])
-        existing = _safe_sources(self.repo.book_sources_for_book(book_id, limit=20))[:10]
+        existing = _safe_sources(self.repo.book_sources_for_book(book_id, limit=30))[:12]
         if existing:
             return existing
         if self.source_collector is None:
             return []
         self.source_collector.collect_for_recommendation(recommendation)
-        return _safe_sources(self.repo.book_sources_for_book(book_id, limit=20))[:10]
+        return _safe_sources(self.repo.book_sources_for_book(book_id, limit=30))[:12]
 
     def _prompt_context(self, recommendation, sources: list[Any] | None = None) -> str:
         memory_context = load_long_term_memory_context(self.memory_dir, self.max_memory_chars)
@@ -797,11 +797,11 @@ def _format_source_context(sources: list[Any]) -> str:
     if not sources:
         return "No collected book source excerpts yet. Use recommendation metadata and be explicit about source limitations."
     blocks = []
-    for index, source in enumerate(sources[:3], start=1):
+    for index, source in enumerate(sources[:6], start=1):
         title = _source_value(source, "title") or "Untitled source"
         url = _source_value(source, "url")
         source_type = _source_value(source, "source_type") or "unknown"
-        excerpt = _source_value(source, "text_excerpt")[:900]
+        excerpt = _source_value(source, "text_excerpt")[:1600]
         blocks.append(
             "\n".join(
                 [

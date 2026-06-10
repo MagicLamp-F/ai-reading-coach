@@ -13,13 +13,31 @@ http://127.0.0.1:8010
 书源管理页：
 
 ```text
-http://127.0.0.1:8010/guided-reading/sources?admin_token=aA5eUV3rUVJMaNIhvvjFL5qGtb-1mr1Pqr8aiHomcLA
+http://127.0.0.1:8010/guided-reading/sources
 ```
 
 阅读计划配置页：
 
 ```text
-http://127.0.0.1:8010/guided-reading/plans?admin_token=aA5eUV3rUVJMaNIhvvjFL5qGtb-1mr1Pqr8aiHomcLA
+http://127.0.0.1:8010/guided-reading/plans
+```
+
+画像复盘页：
+
+```text
+http://127.0.0.1:8010/admin/weekly-report
+```
+
+画像证据页：
+
+```text
+http://127.0.0.1:8010/admin/profile-evidence
+```
+
+默认管理账号密码：
+
+```text
+admin / 123456
 ```
 
 正式部署后，把 `127.0.0.1:8010` 换成正式域名或正式服务端口。
@@ -46,8 +64,10 @@ http://127.0.0.1:8010/guided-reading/plans?admin_token=aA5eUV3rUVJMaNIhvvjFL5qGt
 进入：
 
 ```text
-/guided-reading/sources?admin_token=...
+/guided-reading/sources
 ```
+
+如果尚未登录，页面会先显示管理登录页。
 
 页面分为两块：
 
@@ -189,6 +209,51 @@ http://127.0.0.1:8010/guided-reading/plans?admin_token=aA5eUV3rUVJMaNIhvvjFL5qGt
 你也可以补一句原因。
 
 反馈会写入 `reading_progress_events`，用于后续判断这本书是否适合继续、每天长度是否合适、口吻是否需要调整。
+
+## 确认画像是否被维护
+
+### 1. 看 Hermes 主画像是否写回
+
+执行：
+
+```bash
+python3 -m app.cli show-hermes-profile-sync --json
+```
+
+重点看：
+
+- `native_user_memory_path` 是否指向 Hermes 原生 `USER.md`。
+- `[arc-reading-profile]` 是否存在。
+- `hermes_profile_update_events` 是否有 `status=applied` 记录。
+
+这一步回答“系统有没有真的把反馈交给 Hermes，并把主画像写回/审计下来”。
+
+### 2. 看 ARC 本地画像为什么这样判断
+
+打开：
+
+```text
+/admin/profile-evidence
+```
+
+页面会显示：
+
+- 画像条目：例如长期兴趣、近期兴趣、阅读偏好、知识缺口。
+- 权重和置信度：数值越高，越容易影响后续推荐。
+- 证据链：来自哪本书、哪次反馈、什么原因或自由文本。
+- 最近人工纠偏：你是否确认过、标过不准确或降权。
+
+这一步回答“ARC 为什么认为我有这个偏好，以及这个判断是不是贴切我”。
+
+### 3. 纠偏方式
+
+在画像证据页，每条画像可以操作：
+
+- `确认`：这条画像贴切，会轻微提高置信度。
+- `降权`：方向可能对，但证据不足或当前不重要，会降低权重和置信度。
+- `不准确`：画像判断错了，会更明显降低权重和置信度。
+
+系统不会硬删除证据，会写入 `profile_item_review_events` 审计表，保留纠偏前后的权重和置信度。这样后续可以复盘：模型什么时候误解了你，你什么时候纠正过它。
 
 ## 飞书推送
 

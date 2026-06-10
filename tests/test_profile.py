@@ -5,7 +5,7 @@ from pathlib import Path
 from app.db import connect, init_db
 from app.profile import process_feedback, seed_user_manual
 from app.profile_ingest import HermesProfileIngestError, HermesProfileIngestResult
-from app.repository import RecommendationDraft, Repository
+from app.repository import ProfileItemReviewDraft, RecommendationDraft, Repository
 
 
 class ProfileTests(unittest.TestCase):
@@ -192,6 +192,38 @@ class ProfileTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["system_hypothesis"], "测试用户是否需要系统设计基础")
         self.assertEqual(row["profile_dimensions"], '["knowledge_gap", "system_reliability"]')
+
+    def test_profile_item_review_records_audit_and_downranks(self):
+        self.repo.upsert_profile_item("long_term_interest", "火星纪事", 0.3, 0.4, {"source": "feedback", "book": "火星纪事"})
+        item = self._profile("long_term_interest", "火星纪事")
+
+        updated, event = self.repo.review_profile_item(
+            ProfileItemReviewDraft(
+                profile_item_id=int(item["id"]),
+                action="inaccurate",
+                note="这只是一次试探，不应当当成长期偏好",
+            )
+        )
+
+        self.assertEqual(event["action"], "inaccurate")
+        self.assertEqual(event["previous_weight"], 0.8)
+        self.assertEqual(event["new_weight"], 0.55)
+        self.assertLess(updated["confidence"], item["confidence"])
+        rows = self.repo.profile_items_with_review_summary()
+        self.assertEqual(rows[0]["review_count"], 1)
+        self.assertEqual(rows[0]["inaccurate_count"], 1)
+        self.assertEqual(rows[0]["latest_review_note"], "这只是一次试探，不应当当成长期偏好")
+
+    def test_profile_item_confirm_increases_confidence_without_losing_evidence(self):
+        self.repo.upsert_profile_item("reading_preference", "偏好工程实战", 0.1, 0.1, {"source": "manual"})
+        item = self._profile("reading_preference", "偏好工程实战")
+
+        updated, event = self.repo.review_profile_item(ProfileItemReviewDraft(profile_item_id=int(item["id"]), action="confirm"))
+
+        self.assertEqual(event["action"], "confirm")
+        self.assertGreater(updated["confidence"], item["confidence"])
+        evidence = __import__("json").loads(updated["evidence_json"])
+        self.assertEqual(evidence[0]["source"], "manual")
 
     def _add_recommendation(self, theme: str) -> int:
         run_id = self.repo.create_run("test")

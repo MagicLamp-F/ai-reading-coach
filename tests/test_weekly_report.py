@@ -59,9 +59,13 @@ class WeeklyReportTests(unittest.TestCase):
         report = self.workflow.build_weekly_report()
 
         self.assertIn("一、本周推荐概况", report)
+        self.assertIn("给你的结论", report)
+        self.assertIn("画像写回状态", report)
         self.assertIn("推荐总数：1", report)
         self.assertIn("反馈总数：2", report)
         self.assertIn("正反馈数量：2", report)
+        self.assertIn("ARC structured profile：本周 2 条反馈中，已处理 0 条，待处理 2 条。", report)
+        self.assertIn("Hermes native USER profile：没有查到 feedback.ingest 审计记录", report)
         self.assertIn("喜欢 (like): 1", report)
         self.assertIn("想深入 (go_deeper): 1", report)
         self.assertIn("方法论有用 (useful_methodology): 1", report)
@@ -79,6 +83,8 @@ class WeeklyReportTests(unittest.TestCase):
 
         self.assertIn("推荐总数：0", report)
         self.assertIn("反馈总数：0", report)
+        self.assertIn("本周没有 feedback 事件，所以没有发生“反馈驱动”的 ARC structured profile 写回。", report)
+        self.assertIn("Hermes 主画像也没有收到 feedback.ingest 写回请求", report)
         self.assertIn("暂无反馈", report)
         self.assertIn("暂无原因反馈", report)
         self.assertIn("暂无稳定画像", report)

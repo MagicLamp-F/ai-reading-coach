@@ -26,10 +26,11 @@ from app.feedback import (
     verify_reading_pack_signature,
 )
 from app.guided_reading import GuidedReadingError, GuidedReadingService
-from app.repository import Repository
+from app.repository import ReadingQuoteDraft, Repository
 
 logger = logging.getLogger(__name__)
 MAX_FREE_TEXT_LENGTH = 500
+MAX_QUOTE_TEXT_LENGTH = 800
 
 
 class FeedbackHandler(BaseHTTPRequestHandler):
@@ -77,6 +78,9 @@ class FeedbackHandler(BaseHTTPRequestHandler):
         if parsed.path == "/feedback/inline":
             self._handle_inline_feedback_submission()
             return
+        if parsed.path == "/reading-pack/quote":
+            self._handle_reading_quote_submission()
+            return
         if parsed.path != "/feedback/free-text":
             self._write_text(404, "Not Found")
             return
@@ -84,6 +88,14 @@ class FeedbackHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:
         logger.info("HTTP " + fmt, *args)
+
+    def _read_form(self, max_bytes: int = 12000) -> dict[str, list[str]]:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return {}
+        raw = self.rfile.read(min(length, max_bytes)).decode("utf-8", errors="replace")
+        return parse_qs(raw)
 
     def _handle_feedback(self, query: dict[str, list[str]]) -> None:
         raw_id = _one(query, "recommendation_id")
@@ -141,6 +153,55 @@ class FeedbackHandler(BaseHTTPRequestHandler):
                 self._write_text(404, "快读包不存在")
                 return
             self._write_html(200, _reading_pack_page(self.settings, row, _one(query, "module") or "overview"))
+        finally:
+            conn.close()
+
+    def _handle_reading_quote_submission(self) -> None:
+        form = self._read_form()
+        raw_pack_id = _one(form, "reading_pack_id")
+        token = _one(form, "token") or ""
+        module = (_one(form, "module") or "overview").strip()[:80]
+        section_title = (_one(form, "section_title") or "").strip()[:160]
+        selected_text = (_one(form, "selected_text") or "").strip()
+        note = (_one(form, "note") or "").strip()[:MAX_FREE_TEXT_LENGTH]
+        try:
+            reading_pack_id = int(raw_pack_id)
+        except (TypeError, ValueError):
+            self._write_text(400, "参数错误")
+            return
+        if not verify_reading_pack_signature(reading_pack_id, token, self.settings.feedback_secret):
+            self._write_text(403, "签名无效")
+            return
+        selected_text = " ".join(selected_text.split())[:MAX_QUOTE_TEXT_LENGTH]
+        if not selected_text:
+            self._write_text(400, "摘抄内容不能为空")
+            return
+
+        conn = connect(self.settings.database_path)
+        try:
+            init_db(conn)
+            repo = Repository(conn)
+            row = repo.get_reading_pack_page(reading_pack_id)
+            if row is None:
+                self._write_text(404, "快读包不存在")
+                return
+            quote_id = repo.add_reading_quote(
+                ReadingQuoteDraft(
+                    reading_pack_id=reading_pack_id,
+                    recommendation_id=int(row["recommendation_id"]),
+                    book_id=int(row["book_id"]),
+                    selected_text=selected_text,
+                    note=note,
+                    module=module,
+                    section_title=section_title,
+                    metadata={"surface": "server_page", "book": row["book_title"]},
+                )
+            )
+            _record_quote_profile_signal(repo, row, selected_text, note, quote_id)
+            redirect_url = _reading_pack_module_url(self.settings, reading_pack_id, module) + "#quotes"
+            self.send_response(303)
+            self.send_header("Location", redirect_url)
+            self.end_headers()
         finally:
             conn.close()
 
@@ -630,18 +691,20 @@ def _reading_pack_page(settings: Settings, row, current_module: str) -> str:
     artifact_metadata = _json_loads(row["artifact_metadata_json"], {})
     module_paths = artifact_metadata.get("module_paths", []) if isinstance(artifact_metadata, dict) else []
     recommendation_id = int(row["recommendation_id"])
+    reading_pack_id = int(row["id"])
     modules = _reading_pack_modules(content)
     current_index = _module_index(modules, current_module)
     current_slug, current_label, current_sections = modules[current_index]
-    current_url = _reading_pack_module_url(settings, int(row["id"]), current_slug)
+    current_url = _reading_pack_module_url(settings, reading_pack_id, current_slug)
     feedback_panel = _inline_feedback_panel(settings, recommendation_id, current_url)
-    module_nav = _module_nav(settings, int(row["id"]), modules, current_index, module_paths)
-    overview_panel = _reading_overview_panel(settings, int(row["id"]), modules, current_index)
+    quote_panel = _reading_quote_panel(settings, row, current_slug)
+    module_nav = _module_nav(settings, reading_pack_id, modules, current_index, module_paths)
+    overview_panel = _reading_overview_panel(settings, reading_pack_id, modules, current_index)
     section_items = _prepare_current_sections(current_slug, current_sections)
     intro_panel = _module_intro_panel(current_slug, current_label, section_items)
     section_nav = _section_nav_panel(section_items)
     body = "".join(item["html"] for item in section_items)
-    pager = _module_pager(settings, int(row["id"]), modules, current_index)
+    pager = _module_pager(settings, reading_pack_id, modules, current_index)
     title = f"{row['book_title']} 快读包"
     subtitle = f"{row['book_author']} · {row['status']} · {row['generator_provider']} · {current_label} {current_index + 1}/{len(modules)}"
     return (
@@ -705,7 +768,20 @@ def _reading_pack_page(settings: Settings, row, current_module: str) -> str:
         ".li-part{display:block;margin-top:6px;}"
         ".li-part:first-child{margin-top:0;}"
         ".li-part b{color:#4f5049;}"
-        ".feedbacks{position:sticky;bottom:0;width:calc(100% + 36px);max-width:100vw;margin:28px -18px -72px;padding:12px 18px;background:rgba(243,239,230,.96);border-top:1px solid var(--line);display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;backdrop-filter:blur(10px);}"
+        ".quote-panel{margin:20px 0;padding:18px;border:1px solid var(--line);border-radius:8px;background:#f8f4eb;box-shadow:0 8px 24px rgba(66,54,32,.05);}"
+        ".quote-panel h2{display:flex;align-items:center;gap:8px;margin-bottom:8px;}"
+        ".quote-panel p{margin:0 0 12px;color:var(--muted);font-size:14px;line-height:1.6;}"
+        ".quote-form{display:grid;gap:10px;}"
+        ".quote-form textarea{width:100%;min-height:86px;resize:vertical;border:1px solid var(--line);border-radius:8px;background:#fffefb;color:var(--ink);font-size:14px;line-height:1.55;padding:10px;}"
+        ".quote-form input{width:100%;border:1px solid var(--line);border-radius:8px;background:#fffefb;color:var(--ink);font-size:14px;padding:10px;}"
+        ".quote-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}"
+        ".quote-actions button{border:1px solid var(--accent);border-radius:7px;background:var(--accent);color:#fff;padding:9px 12px;font-size:14px;}"
+        ".quote-actions button.secondary{border-color:#cfc7b9;background:var(--paper);color:var(--accent);}"
+        ".quote-list{display:grid;gap:10px;margin-top:14px;}"
+        ".quote-item{padding:12px;border:1px solid rgba(207,199,185,.9);border-radius:8px;background:var(--paper);}"
+        ".quote-item blockquote{margin:0;color:#34362f;font-size:15px;line-height:1.65;}"
+        ".quote-item small{display:block;margin-top:6px;color:var(--muted);font-size:12px;}"
+        ".feedbacks{width:100%;max-width:100%;margin:18px 0 0;padding:14px;border:1px solid var(--line);border-radius:8px;background:rgba(255,253,248,.86);display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;}"
         ".feedback-group{min-width:176px;border:1px solid #cfc7b9;border-radius:8px;background:var(--paper);}"
         ".feedback-group summary{cursor:pointer;list-style:none;padding:10px 12px;color:var(--accent);font-size:14px;}"
         ".feedback-group summary::-webkit-details-marker{display:none;}"
@@ -718,7 +794,7 @@ def _reading_pack_page(settings: Settings, row, current_module: str) -> str:
         ".pager span{color:var(--muted);background:rgba(255,253,248,.54);}"
         ".pager strong,.pager small{display:block;}"
         ".pager small{margin-top:4px;color:var(--muted);font-size:12px;line-height:1.4;}"
-        "@media(max-width:820px){.reading-layout{display:flex;flex-direction:column;}.section-rail{order:-1;position:static;margin:0 0 16px;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch;}.rail-title{display:inline-block;margin:0 8px 0 0;}.rail-link{display:inline-block;max-width:62vw;margin:0 4px 0 0;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;}.brief-grid{grid-template-columns:1fr;}.toc-grid{grid-template-columns:1fr 1fr;}.toc-card{min-height:84px;}.pager{margin-bottom:18px;}.feedbacks{position:static;width:100%;max-width:100%;margin:18px 0 0;padding:12px 0 0;background:transparent;border-top:1px solid var(--line);display:block;overflow:visible;backdrop-filter:none;}.feedback-group{width:100%;min-width:0;margin:0 0 8px;}.feedback-form{padding:0 12px 12px;}.reason-buttons button{flex:1 1 calc(50% - 6px);}}"
+        "@media(max-width:820px){.reading-layout{display:flex;flex-direction:column;}.section-rail{order:-1;position:static;margin:0 0 16px;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch;}.rail-title{display:inline-block;margin:0 8px 0 0;}.rail-link{display:inline-block;max-width:62vw;margin:0 4px 0 0;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;}.brief-grid{grid-template-columns:1fr;}.toc-grid{grid-template-columns:1fr 1fr;}.toc-card{min-height:84px;}.pager{margin-bottom:18px;}.feedbacks{display:block;overflow:visible;}.feedback-group{width:100%;min-width:0;margin:0 0 8px;}.feedback-form{padding:0 12px 12px;}.reason-buttons button{flex:1 1 calc(50% - 6px);}.quote-actions button{width:100%;}}"
         "@media(max-width:640px){.wrap{padding:24px 14px 68px;}h1{font-size:24px;}.meta{font-size:13px;line-height:1.5;}.content-section{padding:18px 16px;}p,li{font-size:15px;line-height:1.74;}.toc-grid{grid-template-columns:1fr;}.brief-top{display:block;}.brief-time{display:inline-block;margin-top:10px;}.pager{display:block;}.pager a,.pager span{display:block;margin-bottom:8px;}.feedbacks{width:calc(100% + 28px);margin-left:-14px;margin-right:-14px;padding:10px 14px;}.feedback-group{min-width:154px;}}"
         "</style>"
         "</head>"
@@ -736,10 +812,12 @@ def _reading_pack_page(settings: Settings, row, current_module: str) -> str:
         f"{section_nav}"
         "</div>"
         f"{pager}"
+        f"{quote_panel}"
         f"{feedback_panel}"
         "</main>"
         "<script>"
         "function updateScrollBar(){var d=document.documentElement;var max=d.scrollHeight-d.clientHeight;var pct=max>0?(d.scrollTop/max)*100:100;var bar=document.getElementById('scrollBar');if(bar){bar.style.width=pct+'%';}}"
+        "function fillQuote(){var selection=window.getSelection?String(window.getSelection()).trim():'';var box=document.getElementById('selectedText');if(box&&selection){box.value=selection.slice(0,800);box.focus();}}"
         "document.addEventListener('scroll',updateScrollBar,{passive:true});window.addEventListener('resize',updateScrollBar);updateScrollBar();"
         "</script>"
         "</body>"
@@ -896,6 +974,71 @@ def _section_nav_panel(section_items: list[dict[str, str]]) -> str:
         f'<a class="rail-link" href="#{escape(item["id"], quote=True)}">{escape(item["title"])}</a>' for item in section_items
     )
     return f'<aside class="section-rail" aria-label="页内目录"><p class="rail-title">页内目录</p>{links}</aside>'
+
+
+def _reading_quote_panel(settings: Settings, row, current_module: str) -> str:
+    reading_pack_id = int(row["id"])
+    quotes = []
+    conn = connect(settings.database_path)
+    try:
+        init_db(conn)
+        repo = Repository(conn)
+        quotes = repo.reading_quotes_for_pack(reading_pack_id, limit=12)
+    finally:
+        conn.close()
+
+    quote_items = []
+    for quote in quotes:
+        note = f'<small>想法：{escape(quote["note"])}</small>' if quote["note"] else ""
+        meta = " / ".join(part for part in [quote["module"], quote["section_title"], quote["created_at"]] if part)
+        quote_items.append(
+            '<article class="quote-item">'
+            f'<blockquote>{escape(quote["selected_text"])}</blockquote>'
+            f"{note}"
+            f"<small>{escape(meta)}</small>"
+            "</article>"
+        )
+    quote_list = '<div class="quote-list">' + "".join(quote_items) + "</div>" if quote_items else ""
+    token_url = build_reading_pack_url(settings.public_base_url, reading_pack_id, settings.feedback_secret)
+    token = _one(parse_qs(urlparse(token_url).query), "token") or ""
+    return (
+        '<section class="quote-panel" id="quotes" aria-label="我的摘抄">'
+        "<h2>我的摘抄</h2>"
+        "<p>选中页面里想留下的句子，点“填入选中文本”，再保存。摘抄会关联到这本书，并作为画像证据参与后续推荐。</p>"
+        '<form class="quote-form" method="post" action="/reading-pack/quote">'
+        f'<input type="hidden" name="reading_pack_id" value="{reading_pack_id}">'
+        f'<input type="hidden" name="token" value="{escape(token, quote=True)}">'
+        f'<input type="hidden" name="module" value="{escape(current_module, quote=True)}">'
+        '<input name="section_title" maxlength="160" placeholder="可选：这一句来自哪一节">'
+        f'<textarea id="selectedText" name="selected_text" maxlength="{MAX_QUOTE_TEXT_LENGTH}" placeholder="选中正文中的句子后点击下方按钮，或手动粘贴一句。"></textarea>'
+        f'<input name="note" maxlength="{MAX_FREE_TEXT_LENGTH}" placeholder="可选：为什么想留下这句">'
+        '<div class="quote-actions">'
+        '<button class="secondary" type="button" onclick="fillQuote()">填入选中文本</button>'
+        '<button type="submit">保存摘抄</button>'
+        "</div>"
+        "</form>"
+        f"{quote_list}"
+        "</section>"
+    )
+
+
+def _record_quote_profile_signal(repo: Repository, row, selected_text: str, note: str, quote_id: int) -> None:
+    book = f"{row['book_title']} {row['book_author'] or ''}".strip()
+    repo.upsert_profile_item(
+        category="reading_preference",
+        content=f"喜欢摘抄 {row['book_title']} 中有回味价值的句子",
+        weight_delta=0.06,
+        confidence_delta=0.04,
+        evidence={
+            "source": "reading_quote",
+            "quote_id": quote_id,
+            "reading_pack_id": int(row["id"]),
+            "recommendation_id": int(row["recommendation_id"]),
+            "book": book,
+            "quote": selected_text[:300],
+            "note": note,
+        },
+    )
 
 
 def _prepare_current_sections(slug: str, sections: list[str]) -> list[dict[str, str]]:

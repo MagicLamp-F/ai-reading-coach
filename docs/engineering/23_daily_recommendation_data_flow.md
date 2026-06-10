@@ -1,6 +1,6 @@
 # Daily Recommendation Data Flow
 
-更新时间：2026-06-09
+更新时间：2026-06-10
 
 本文描述 `ai-reading-coach` 当前每日推荐链路的数据流、Hermes 参与边界、ARC 事实账本边界，以及每个可扩展小流程的输入、输出和 artifact。
 
@@ -58,6 +58,12 @@ run_daily_recommendations()
 22. ARC 发送本轮 profile test summary
 23. ARC finish_run(success/failed)
 ```
+
+2026-06-10 可靠性更新：
+
+- 如果 Hermes reading pack agent 超时或失败，ARC 现在只记录 `run_logs.warning_message`，不再把整次 daily 标记为 failed。
+- 推荐仍会落库并投递，飞书卡片会保留快读包入口字段；若快读包缺失，则卡片只提示无法打开完整包。
+- 服务器 systemd 入口统一到 `0.0.0.0:8010`，与 `PUBLIC_BASE_URL=http://120.53.247.229:8010` 保持一致，避免快读包 URL 指向拒绝连接的端口。
 
 ## 3. 输入数据
 
@@ -466,12 +472,114 @@ reading_pack_url missing
 - `recommendations`
 - `books`
 - `reading_packs`
+- `reading_quotes`
 - `artifacts`
 - `delivery_outbox`
 - `cost_logs`
 - `run_logs`
 
-## 8. Artifacts 总表
+## 8. 摘抄数据链路
+
+2026-06-10 新增快读包摘抄能力。目标是让用户在阅读快读包时，把其中想反复回味的原著句子保存下来，并让这类句子偏好进入后续画像上下文。
+
+### 8.1 页面入口
+
+快读包页面新增“摘抄 / 我的摘抄”面板：
+
+```text
+用户在快读包正文选中一句话
+-> 点击“填入选中文本”
+-> 可补充来自哪一节、为什么喜欢
+-> 点击“保存摘抄”
+```
+
+支持两个页面形态：
+
+- 传统服务端 HTML 快读包页：POST `/reading-pack/quote`
+- React 快读包页：POST `/api/reading-packs/{reading_pack_id}/quotes`
+
+保存后，快读包页面会显示最近摘抄；管理页 `/admin/quotes` 会按时间展示所有摘抄，并关联作品、作者、模块和小节。
+
+### 8.2 数据写入
+
+摘抄落库到：
+
+```text
+reading_quotes
+```
+
+核心字段：
+
+- `reading_pack_id`
+- `recommendation_id`
+- `book_id`
+- `selected_text`
+- `note`
+- `module`
+- `section_title`
+- `source_surface`
+- `metadata_json`
+
+索引：
+
+- `idx_reading_quotes_pack_created`
+- `idx_reading_quotes_book_created`
+
+这保证后续可以从快读包、作品、管理后台三个角度回看摘抄。
+
+### 8.3 画像信号
+
+保存摘抄后，ARC 会同步写入：
+
+```text
+profile_items.category = reading_preference
+evidence.source = reading_quote
+```
+
+证据里包含：
+
+- `quote_id`
+- `reading_pack_id`
+- `recommendation_id`
+- `book`
+- `quote`
+- `note`
+
+这一步让后续 daily workflow 构造 `profile_context` 时，Hermes 能看到“用户反复保存什么类型的句子”。当前实现是 ARC structured profile 可见，不是 Hermes native memory 的直接写入。
+
+### 8.4 Hermes 当前参与边界
+
+当前边界：
+
+```text
+quote submission
+-> ARC writes reading_quotes
+-> ARC writes profile_items evidence
+-> next daily profile_context includes reading_preference
+-> Hermes recommendation/generation routes can use it
+```
+
+Hermes 目前不会在摘抄提交当下启动独立 native 子 agent，也不会直接改写 Hermes USER memory。这样做的原因是摘抄属于高频小信号，先进入 ARC 事实账本和结构化画像，避免把未聚合的碎片直接写入长期主画像。
+
+### 8.5 后续可扩展方式
+
+建议按这个顺序演进：
+
+1. `quote.ingest` 小流程：定期把最近摘抄交给 Hermes，总结句式、主题、情绪和审美偏好，再写回 Hermes native USER memory。
+2. 作品级摘抄页：在书籍详情或推荐历史里展示“这本书我摘抄过什么”。
+3. 摘抄复习队列：按时间间隔或主题，把旧摘抄推回飞书，形成复读和回味机制。
+4. 相似句偏好推荐：推荐时不仅看主题和类型，也看语言风格、叙事密度、抽象程度和情绪温度。
+5. Hermes 子角色拆分：让候选研究员关注“作品是否有可摘抄密度”，让审稿人检查推荐理由是否匹配用户保存过的句子偏好，让事实核验员确认摘抄是否来自原著或可靠来源。
+
+### 8.6 布局修复
+
+传统服务端快读包页修复了桌面端“下一节”分页和反馈区重叠问题：
+
+- `.feedbacks` 从底部 sticky 行为改为普通页面内反馈区。
+- `.pager` 和 `.feedbacks` 现在按文档流排列，避免反馈区压住下一节。
+- 移动端仍保持横向/折叠友好的反馈按钮布局。
+
+## 9. Artifacts 总表
 
 | 阶段 | Artifact Type | 路径 | 是否影响正式推荐 |
 | --- | --- | --- | --- |
@@ -485,7 +593,7 @@ reading_pack_url missing
 | Gating | `recommendation_gating_decision` | `library/gating-decisions/YYYY/MM/` | 当前 observe-only |
 | Reading Pack | `reading_pack` | `library/reading-packs/YYYY/MM/` | 投递内容 |
 
-## 9. 开关矩阵
+## 10. 开关矩阵
 
 | 开关 | 默认值 | 作用 |
 | --- | --- | --- |
@@ -500,7 +608,7 @@ reading_pack_url missing
 | `ARC_AGENTIC_SHADOW_MAX_MODEL_CALLS` | `1` | 影子评估模型调用预算 |
 | `ARC_AGENTIC_SHADOW_MAX_SEARCH_CALLS` | `0` | 影子评估搜索预算 |
 
-## 10. 推荐的真实验证命令
+## 11. 推荐的真实验证命令
 
 只开 observe-only 小流程：
 
@@ -523,7 +631,24 @@ python3 -m app.cli run-daily
 - `recommendation_agentic_shadow` 是否提出比 baseline 更好的替代。
 - `recommendation_gating_decision` 是否正确汇总 review、fact-check、shadow，并保持 `enforced_action=observe_only`。
 
-## 11. 后续演进
+2026-06-10 本轮代码验证：
+
+```bash
+python3 -m py_compile app/api/main.py app/api/serializers.py app/server.py app/repository.py app/db.py app/workflow.py
+python3 -m unittest tests.test_db tests.test_server tests.test_api -q
+python3 -m unittest tests.test_lark tests.test_workflow -q
+cd web && npm run build
+```
+
+测试覆盖：
+
+- `tests.test_workflow` 验证 Hermes reading pack agent 失败时 daily 仍 success，并写 warning。
+- `tests.test_server` 验证服务端快读包页含摘抄面板、POST 后写入 `reading_quotes` 和 `profile_items`。
+- `tests.test_api` 验证 React API 保存摘抄、快读包查询摘抄、管理页查询摘抄。
+- `tests.test_db` 验证 `reading_quotes` 表和索引创建。
+- `npm run build` 验证 React 快读包摘抄面板、管理页和类型定义可通过生产构建。
+
+## 12. 后续演进
 
 建议顺序：
 
@@ -532,3 +657,4 @@ python3 -m app.cli run-daily
 3. 用后续用户反馈评估 shadow / research 是否比 baseline 更好。
 4. 如果长期收益明确，再考虑 `hermes-agentic-json`。
 5. 即使启用真实 bounded delegation，也保持 ARC 独占 SQLite、memory application、delivery 和 run state。
+6. 为摘抄增加 `quote.ingest`，让 Hermes 把多条摘抄聚合成稳定的语言/审美偏好，而不是逐条碎片化写入长期画像。

@@ -3,21 +3,27 @@ import { Plus } from 'lucide-react';
 import { FormEvent, useState } from 'react';
 import { apiGet, apiPost, searchParams } from '../shared/api/client';
 import { ReadingPlan } from '../shared/api/types';
+import { AdminLogin, isAuthError } from '../shared/ui/AdminAuth';
 import { Shell } from '../shared/ui/Shell';
-import { ErrorState, LoadingState, MissingParams } from '../shared/ui/State';
+import { ErrorState, LoadingState } from '../shared/ui/State';
 
 export function ReadingPlansPage() {
   const adminToken = searchParams().get('admin_token');
-  if (!adminToken) return <MissingParams message="管理入口需要 admin_token。" />;
+  const queryClient = useQueryClient();
+  const authSuffix = adminToken ? `?admin_token=${encodeURIComponent(adminToken)}` : '';
   const query = useQuery({
-    queryKey: ['reading-plans', adminToken],
-    queryFn: () => apiGet<{ plans: ReadingPlan[] }>(`/api/admin/reading-plans?admin_token=${encodeURIComponent(adminToken)}`),
+    queryKey: ['reading-plans', adminToken ?? 'session'],
+    queryFn: () => apiGet<{ plans: ReadingPlan[] }>(`/api/admin/reading-plans${authSuffix}`),
   });
   if (query.isLoading) return <LoadingState />;
+  if (query.isError && !adminToken && isAuthError(query.error)) {
+    return <AdminLogin onLoggedIn={() => queryClient.invalidateQueries({ queryKey: ['reading-plans', 'session'] })} />;
+  }
   if (query.isError) return <ErrorState message={(query.error as Error).message} />;
+  const sourcesHref = adminToken ? `/guided-reading/sources?admin_token=${encodeURIComponent(adminToken)}` : '/guided-reading/sources';
 
   return (
-    <Shell eyebrow="Admin" title="导读计划配置" meta="创建和查看渐进导读计划" actions={<a className="secondary-link" href={`/guided-reading/sources?admin_token=${encodeURIComponent(adminToken)}`}>书源管理</a>}>
+    <Shell eyebrow="Admin" title="导读计划配置" meta="创建和查看渐进导读计划" actions={<a className="secondary-link" href={sourcesHref}>书源管理</a>}>
       <section className="admin-grid">
         <PlanTable plans={query.data?.plans ?? []} />
         <PlanForm adminToken={adminToken} />
@@ -60,14 +66,14 @@ function PlanTable({ plans }: { plans: ReadingPlan[] }) {
   );
 }
 
-function PlanForm({ adminToken }: { adminToken: string }) {
+function PlanForm({ adminToken }: { adminToken: string | null }) {
   const queryClient = useQueryClient();
   const [result, setResult] = useState('');
   const mutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => apiPost<{ first_day_url: string }>('/api/admin/reading-plans', payload),
     onSuccess: (data) => {
       setResult(data.first_day_url);
-      queryClient.invalidateQueries({ queryKey: ['reading-plans', adminToken] });
+      queryClient.invalidateQueries({ queryKey: ['reading-plans', adminToken ?? 'session'] });
     },
   });
 
@@ -75,7 +81,7 @@ function PlanForm({ adminToken }: { adminToken: string }) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     mutation.mutate({
-      admin_token: adminToken,
+      ...(adminToken ? { admin_token: adminToken } : {}),
       title: String(form.get('title') || ''),
       author: String(form.get('author') || ''),
       plan_days: Number(form.get('plan_days') || 5),

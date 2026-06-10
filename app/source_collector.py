@@ -14,7 +14,7 @@ from app.search import SearchResult
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SOURCE_EXCERPT_CHARS = 6000
+DEFAULT_SOURCE_EXCERPT_CHARS = 9000
 
 
 @dataclass(frozen=True)
@@ -35,9 +35,9 @@ class BookSourceCollector:
         search=None,
         max_excerpt_chars: int = DEFAULT_SOURCE_EXCERPT_CHARS,
         search_enabled: bool = True,
-        max_search_results: int = 3,
+        max_search_results: int = 5,
         search_depth: str = "advanced",
-        search_queries_per_book: int = 3,
+        search_queries_per_book: int = 6,
         include_raw_content: bool = True,
     ):
         self.repo = repo
@@ -461,6 +461,9 @@ def _source_search_queries(title: str, author: str) -> list[str]:
     base = f'"{title}" "{author}"'.strip()
     return [
         f"{base} book table of contents chapter outline sample chapter",
+        f"{base} publisher official book page isbn overview",
+        f"{base} excerpt sample chapter preview read an excerpt",
         f"{base} author interview lecture podcast transcript key ideas",
         f"{base} book review summary notes examples criticism",
+        f"{base} course syllabus reading guide discussion questions",
     ]

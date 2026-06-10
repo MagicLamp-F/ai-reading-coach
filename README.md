@@ -23,6 +23,7 @@ Hermes 原生 USER.md [arc-reading-profile] 作为主画像
 - ARC 会从 SQLite 推荐和反馈历史生成增强版 `RecommendationHistoryContext`，包含 hard exclusions、近期 exact-title cooldown、反馈分布、重复标题/主题、正反馈锚点、负反馈/中性弱匹配信号和 Hermes selection instruction。
 - 当前 Hermes wrapper 仍是 `--oneshot` 非交互调用，不提供可控 session/thread id；同一次 `run-daily` 内的短局部链路通过 ARC 显式 `local_session` context 串联，跨天状态只落 Hermes 原生 memory 或 ARC SQLite。
 - 未处理反馈会在下一次 `run-daily` 开始时交给 Hermes `reading.feedback.ingest` 判断是否更新主画像；ARC 记录 `hermes_profile_update_events` 审计，并只受控写入 Hermes 原生 `USER.md` 的 `[arc-reading-profile]` entry。
+- 管理页提供 `/admin/profile-evidence` 画像证据链，可查看 ARC 本地画像条目的来源证据，并对不贴切画像执行确认、不准确或降权纠偏。
 - Hermes provider 默认严格失败：配置 `hermes-agent` 后，如果 Hermes route 无输出或无效 JSON，任务会失败并记录错误，不再静默生成 fallback 内容。
 - 深度读书包会写入 `reading_packs`、`artifacts` 和 `library/`，并可在 Web 前端阅读。
 - React Web 前端根路径提供移动端兼容的个人阅读门面，入口包括阅读包、分日导读、导读计划和书源管理。
@@ -65,16 +66,16 @@ HERMES_AGENT_COMMAND=/home/ubuntu/projects/hermes-agent/bin/reflect-json
 HERMES_AGENT_TIMEOUT_SECONDS=180
 ```
 
-启动传统 HTML 反馈/阅读服务：
+启动传统 HTML 反馈服务（只保留旧飞书反馈入口，避免和 FastAPI 抢端口）：
 
 ```bash
-python3 -m app.cli run-server --host 0.0.0.0 --port 8000
+python3 -m app.cli run-server --host 127.0.0.1 --port 8002
 ```
 
 启动 JSON API：
 
 ```bash
-python3 -m app.cli run-api --host 0.0.0.0 --port 8000
+python3 -m app.cli run-api --host 127.0.0.1 --port 8000
 ```
 
 启动 React Web 前端：
@@ -116,7 +117,27 @@ docker compose up --build -d
 | React Web 前端 | `http://localhost:8010/` | 移动端门面、阅读包、分日导读和管理入口 |
 | Web 代理 API | `http://localhost:8010/api/healthz` | 通过 Vite/nginx 访问后端 |
 | 后端 API | `http://localhost:8000/api/healthz` | FastAPI JSON API |
-| 传统 HTML 服务 | `http://localhost:8000/healthz` | `run-server` 反馈/阅读页 |
+| 传统 HTML 服务 | `http://localhost:8002/healthz` | `run-server` 旧反馈入口 |
+
+常用管理页：
+
+```text
+http://localhost:8010/admin/weekly-report
+http://localhost:8010/admin/profile-evidence
+```
+
+管理入口默认账号密码：
+
+```text
+admin / 123456
+```
+
+可用 `.env` 覆盖：
+
+```env
+ARC_ADMIN_USERNAME=admin
+ARC_ADMIN_PASSWORD=123456
+```
 
 ## 常用命令
 
@@ -124,8 +145,8 @@ docker compose up --build -d
 python3 -m app.cli init-db
 python3 -m app.cli seed-profile --file prompts/user_manual.example.md
 python3 -m app.cli run-daily
-python3 -m app.cli run-server --host 0.0.0.0 --port 8000
-python3 -m app.cli run-api --host 0.0.0.0 --port 8000
+python3 -m app.cli run-server --host 127.0.0.1 --port 8002
+python3 -m app.cli run-api --host 127.0.0.1 --port 8000
 python3 -m app.cli show-hermes-profile-sync --json
 python3 -m app.cli generate-reading-pack --recommendation-id <id>
 python3 -m app.cli run-weekly-report
@@ -164,6 +185,7 @@ python3 -m app.cli run-scheduler
 ## 数据库表
 
 - `profile_items`：画像条目，含类别、权重、置信度、证据。
+- `profile_item_review_events`：人工确认/纠偏画像条目的审计记录，保留操作前后的权重和置信度。
 - `books`：书籍去重信息。
 - `recommendations`：每日推荐记录。
 - `feedback_events`：飞书反馈链接或 Telegram 按钮反馈，含反馈类型、原因和自由文本。
@@ -182,6 +204,7 @@ python3 -m app.cli run-scheduler
 5. 可选自由文本能写入 `feedback_events.free_text`。
 6. 再次 `run-daily` 前会处理未回写反馈，调用 Hermes `reading.feedback.ingest`，写入 `hermes_profile_update_events`，并更新 `profile_items`。
 7. `run-weekly-report` 能发送画像复盘，包含反馈分布、原因分布、画像变化、可能误解和下周建议。
+8. `/admin/profile-evidence` 能显示画像条目的证据链；点击“确认 / 不准确 / 降权”后会写入 `profile_item_review_events`，并相应调整本地画像权重和置信度。
 
 ## 文档
 

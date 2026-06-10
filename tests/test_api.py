@@ -72,6 +72,44 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(row["reason_code"], reason["code"])
         self.assertEqual(row["free_text"], "正好需要")
 
+    def test_reading_pack_quote_submission_and_admin_listing(self):
+        reading_pack_id = self._add_reading_pack()
+        token = sign_reading_pack(reading_pack_id, self.settings.feedback_secret)
+
+        saved = self.client.post(
+            f"/api/reading-packs/{reading_pack_id}/quotes",
+            json={
+                "token": token,
+                "selected_text": "这是一句想反复回味的原著句子",
+                "note": "语言很有画面感",
+                "module": "overview",
+                "section_title": "一句话主张",
+            },
+        )
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json()["status"], "saved")
+        self.assertEqual(saved.json()["quote"]["selected_text"], "这是一句想反复回味的原著句子")
+
+        listed = self.client.get(f"/api/reading-packs/{reading_pack_id}/quotes", params={"token": token})
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["items"][0]["note"], "语言很有画面感")
+
+        admin_token = sign_feedback_free_text(0, self.settings.feedback_secret)
+        admin = self.client.get("/api/admin/reading-quotes", params={"admin_token": admin_token})
+        self.assertEqual(admin.status_code, 200)
+        self.assertEqual(admin.json()["items"][0]["book"]["title"], "Test Book")
+
+        conn = connect(self.db_path)
+        try:
+            profile = conn.execute(
+                "SELECT * FROM profile_items WHERE evidence_json LIKE ? ORDER BY id DESC LIMIT 1",
+                ('%"source": "reading_quote"%',),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(profile)
+
     def test_reading_pack_rejects_bad_signature(self):
         reading_pack_id = self._add_reading_pack()
 
@@ -115,6 +153,62 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["plans"][0]["book_title"], "低耐心阅读")
+
+    def test_admin_login_cookie_can_list_plans_without_token(self):
+        self._add_guided_reading_plan()
+
+        login = self.client.post("/api/admin/login", json={"username": "admin", "password": "123456"})
+        response = self.client.get("/api/admin/reading-plans")
+
+        self.assertEqual(login.status_code, 200)
+        self.assertIn("arc_admin_session", login.headers.get("set-cookie", ""))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["plans"][0]["book_title"], "低耐心阅读")
+
+    def test_admin_login_rejects_bad_password(self):
+        response = self.client.post("/api/admin/login", json={"username": "admin", "password": "bad"})
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_weekly_report_requires_login_and_returns_user_summary(self):
+        unauthorized = self.client.get("/api/admin/weekly-report")
+        self.client.post("/api/admin/login", json={"username": "admin", "password": "123456"})
+        response = self.client.get("/api/admin/weekly-report")
+
+        self.assertEqual(unauthorized.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("user_summary", payload)
+        self.assertIn("writeback_status", payload)
+        self.assertIn("report_text", payload)
+        self.assertGreaterEqual(payload["metrics"]["recommendation_count"], 1)
+
+    def test_admin_profile_evidence_lists_items_and_accepts_review(self):
+        conn = connect(self.db_path)
+        try:
+            repo = Repository(conn)
+            repo.upsert_profile_item("long_term_interest", "火星纪事", 0.2, 0.3, {"source": "feedback", "book": "火星纪事"})
+            item = conn.execute("SELECT id FROM profile_items WHERE category = ?", ("long_term_interest",)).fetchone()
+        finally:
+            conn.close()
+
+        unauthorized = self.client.get("/api/admin/profile-evidence")
+        self.client.post("/api/admin/login", json={"username": "admin", "password": "123456"})
+        listed = self.client.get("/api/admin/profile-evidence")
+        reviewed = self.client.post(
+            f"/api/admin/profile-evidence/{int(item['id'])}/review",
+            json={"action": "downrank", "note": "偏好证据还不够"},
+        )
+
+        self.assertEqual(unauthorized.status_code, 403)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["items"][0]["content"], "火星纪事")
+        self.assertEqual(listed.json()["items"][0]["evidence"][0]["source"], "feedback")
+        self.assertEqual(reviewed.status_code, 200)
+        payload = reviewed.json()
+        self.assertEqual(payload["event"]["action"], "downrank")
+        self.assertEqual(payload["item"]["latest_review"]["note"], "偏好证据还不够")
+        self.assertLess(payload["item"]["weight"], payload["event"]["previous_weight"])
 
     def _add_recommendation(self) -> int:
         run_id = self.repo.create_run("test")

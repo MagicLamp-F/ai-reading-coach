@@ -3,21 +3,27 @@ import { Upload } from 'lucide-react';
 import { FormEvent } from 'react';
 import { apiGet, apiUpload, searchParams } from '../shared/api/client';
 import { ReadingSource } from '../shared/api/types';
+import { AdminLogin, isAuthError } from '../shared/ui/AdminAuth';
 import { Shell } from '../shared/ui/Shell';
-import { ErrorState, LoadingState, MissingParams } from '../shared/ui/State';
+import { ErrorState, LoadingState } from '../shared/ui/State';
 
 export function ReadingSourcesPage() {
   const adminToken = searchParams().get('admin_token');
-  if (!adminToken) return <MissingParams message="书源管理入口需要 admin_token。" />;
+  const queryClient = useQueryClient();
+  const authSuffix = adminToken ? `?admin_token=${encodeURIComponent(adminToken)}` : '';
   const query = useQuery({
-    queryKey: ['reading-sources', adminToken],
-    queryFn: () => apiGet<{ sources: ReadingSource[] }>(`/api/admin/reading-sources?admin_token=${encodeURIComponent(adminToken)}`),
+    queryKey: ['reading-sources', adminToken ?? 'session'],
+    queryFn: () => apiGet<{ sources: ReadingSource[] }>(`/api/admin/reading-sources${authSuffix}`),
   });
   if (query.isLoading) return <LoadingState />;
+  if (query.isError && !adminToken && isAuthError(query.error)) {
+    return <AdminLogin onLoggedIn={() => queryClient.invalidateQueries({ queryKey: ['reading-sources', 'session'] })} />;
+  }
   if (query.isError) return <ErrorState message={(query.error as Error).message} />;
+  const planHref = adminToken ? `/guided-reading/plans?admin_token=${encodeURIComponent(adminToken)}` : '/guided-reading/plans';
 
   return (
-    <Shell eyebrow="Admin" title="书源管理" meta="导入书源并基于书源创建计划" actions={<a className="secondary-link" href={`/guided-reading/plans?admin_token=${encodeURIComponent(adminToken)}`}>导读计划</a>}>
+    <Shell eyebrow="Admin" title="书源管理" meta="导入书源并基于书源创建计划" actions={<a className="secondary-link" href={planHref}>导读计划</a>}>
       <section className="admin-grid">
         <section className="table-panel">
           <h2>已导入书源</h2>
@@ -28,7 +34,7 @@ export function ReadingSourcesPage() {
                 {(query.data?.sources ?? []).map((source) => (
                   <tr key={source.id}>
                     <td>{source.id}</td>
-                    <td><a href={`/guided-reading/source?id=${source.id}&admin_token=${encodeURIComponent(adminToken)}`}>{source.title}</a></td>
+                    <td><a href={sourceHref(source.id, adminToken)}>{source.title}</a></td>
                     <td>{source.original_filename}</td>
                     <td>{source.file_format}</td>
                     <td>{source.char_count}</td>
@@ -44,19 +50,19 @@ export function ReadingSourcesPage() {
   );
 }
 
-function UploadForm({ adminToken }: { adminToken: string }) {
+function UploadForm({ adminToken }: { adminToken: string | null }) {
   const queryClient = useQueryClient();
   const mutation = useMutation({
     mutationFn: (form: FormData) => apiUpload<{ source_id: number }>('/api/admin/reading-sources/upload', form),
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['reading-sources', adminToken] });
-      window.location.href = `/guided-reading/source?id=${data.source_id}&admin_token=${encodeURIComponent(adminToken)}`;
+      queryClient.invalidateQueries({ queryKey: ['reading-sources', adminToken ?? 'session'] });
+      window.location.href = sourceHref(data.source_id, adminToken);
     },
   });
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    form.set('admin_token', adminToken);
+    if (adminToken) form.set('admin_token', adminToken);
     mutation.mutate(form);
   }
   return (
@@ -71,4 +77,10 @@ function UploadForm({ adminToken }: { adminToken: string }) {
       {mutation.isError ? <p className="error-text">{(mutation.error as Error).message}</p> : null}
     </section>
   );
+}
+
+function sourceHref(sourceId: number, adminToken: string | null) {
+  const params = new URLSearchParams({ id: String(sourceId) });
+  if (adminToken) params.set('admin_token', adminToken);
+  return `/guided-reading/source?${params.toString()}`;
 }

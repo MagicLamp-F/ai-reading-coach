@@ -1,6 +1,5 @@
-import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Activity, BookOpen, CalendarDays, FileUp, HeartHandshake, Library, Sparkles } from 'lucide-react';
+import { Activity, BarChart3, BookMarked, BookOpen, CalendarDays, FileUp, Fingerprint, HeartHandshake, Library, Sparkles } from 'lucide-react';
 import { apiGet } from '../shared/api/client';
 
 type HealthResponse = {
@@ -25,46 +24,39 @@ const quickLinks = [
     detail: '安排阅读节奏',
     href: '/guided-reading/plans',
     icon: CalendarDays,
-    needsAdminToken: true,
   },
   {
     title: '书源管理',
     detail: '导入完整书源',
     href: '/guided-reading/sources',
     icon: FileUp,
-    needsAdminToken: true,
+  },
+  {
+    title: '画像复盘',
+    detail: '查看周报与写回',
+    href: '/admin/weekly-report',
+    icon: BarChart3,
+  },
+  {
+    title: '画像证据',
+    detail: '确认或纠偏画像',
+    href: '/admin/profile-evidence',
+    icon: Fingerprint,
+  },
+  {
+    title: '我的摘抄',
+    detail: '回看喜欢的句子',
+    href: '/admin/quotes',
+    icon: BookMarked,
   },
 ];
 
 export function HomePage() {
-  const [adminToken, setAdminToken] = useState(() => window.localStorage.getItem('arc_admin_token') ?? '');
   const health = useQuery({
     queryKey: ['healthz'],
     queryFn: () => apiGet<HealthResponse>('/api/healthz'),
   });
   const statusLabel = health.isLoading ? 'Checking' : health.isError ? 'Offline' : health.data?.status ?? 'OK';
-
-  const normalizedToken = adminToken.trim();
-  const links = useMemo(
-    () =>
-      quickLinks.map((item) => {
-        const href =
-          item.needsAdminToken && normalizedToken
-            ? `${item.href}?admin_token=${encodeURIComponent(normalizedToken)}`
-            : item.href;
-        return { ...item, href };
-      }),
-    [normalizedToken],
-  );
-
-  function handleTokenChange(value: string) {
-    setAdminToken(value);
-    if (value.trim()) {
-      window.localStorage.setItem('arc_admin_token', value.trim());
-    } else {
-      window.localStorage.removeItem('arc_admin_token');
-    }
-  }
 
   return (
     <main className="home-shell">
@@ -94,20 +86,11 @@ export function HomePage() {
             <p className="home-section-label">Admin</p>
             <h2>私人阅读工作台</h2>
           </div>
-          <label className="home-token-field">
-            <span>管理 Token</span>
-            <input
-              type="password"
-              value={adminToken}
-              onChange={(event) => handleTokenChange(event.target.value)}
-              placeholder="admin_token"
-              autoComplete="off"
-            />
-          </label>
+          <p className="home-token-note">管理页已切换为账号登录，会话保存在 HttpOnly cookie 中。</p>
         </div>
 
         <div className="home-link-grid">
-          {links.map((item) => {
+          {quickLinks.map((item) => {
             const Icon = item.icon;
             return (
               <a className="home-link-card" href={item.href} key={item.title}>

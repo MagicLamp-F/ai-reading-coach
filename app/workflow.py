@@ -387,85 +387,7 @@ class ReadingCoachWorkflow:
         )
 
     def build_weekly_report(self) -> str:
-        days = 7
-        recommendation_count = self.repo.weekly_recommendation_count(days)
-        feedback_type_counts = self.repo.weekly_feedback_type_counts(days)
-        reason_code_counts = self.repo.weekly_reason_code_counts(days)
-        dimension_counts = self.repo.weekly_feedback_dimension_counts(days)
-        positive_theme_counts = self.repo.weekly_positive_theme_counts(days)
-        misread_signal_counts = self.repo.weekly_misread_signal_counts(days)
-        recent_profiles = self.repo.recent_profile_updates(days, limit=8)
-        profile_items = self.repo.profile_items_for_report(days, limit=40)
-        profile_misunderstanding_signals = self.repo.weekly_profile_misunderstanding_signals(days)
-        recent_free_texts = self.repo.recent_feedback_free_texts(days, limit=3)
-        enhanced_dimensions = self.repo.recent_profile_dimension_counts(days)
-
-        feedback_total = sum(int(row["count"]) for row in feedback_type_counts)
-        positive_total = sum(
-            int(row["count"])
-            for row in feedback_type_counts
-            if row["feedback_type"] in {"like", "go_deeper", "already_read"}
-        )
-        hit_rate = round((positive_total / feedback_total) * 100, 1) if feedback_total else 0.0
-
-        feedback_lines = [
-            f"- {FEEDBACK_LABELS.get(row['feedback_type'], row['feedback_type'])} ({row['feedback_type']}): {row['count']}"
-            for row in feedback_type_counts
-        ] or ["- 暂无反馈"]
-        reason_lines = [
-            f"- {FEEDBACK_REASON_LABELS.get(row['reason_code'], row['reason_code'])} ({row['reason_code']}): {row['count']}"
-            for row in reason_code_counts
-        ] or ["- 暂无原因反馈"]
-        dimension_lines = [
-            f"- {_dimension_type_label(row['dimension_type'])} / {FEEDBACK_LABELS.get(row['feedback_type'], row['feedback_type'])}: {row['count']}"
-            for row in dimension_counts
-        ] or ["- 暂无可分布的反馈"]
-        profile_sections = _profile_confidence_sections(profile_items, profile_misunderstanding_signals)
-        enhanced_lines = [
-            (
-                f"- {PROFILE_CATEGORIES.get(row['category'], row['category'])}: "
-                f"{row['item_count']} 条画像，证据 {int(row['evidence_count'] or 0)}，平均权重 {round(float(row['avg_weight'] or 0), 2)}"
-            )
-            for row in enhanced_dimensions
-        ] or ["- 暂无明显增强的画像维度。"]
-        misunderstanding_lines = _misunderstanding_lines(misread_signal_counts)
-        free_text_lines = _free_text_summary_lines(recent_free_texts)
-        next_direction_lines = _next_direction_lines(positive_theme_counts, recent_profiles, feedback_total)
-        return (
-            "7 天画像复盘\n\n"
-            "一、本周推荐概况\n"
-            f"- 推荐总数：{recommendation_count}\n"
-            f"- 反馈总数：{feedback_total}\n"
-            f"- 正反馈数量：{positive_total}（like / go_deeper / already_read）\n"
-            f"- 推荐命中率：{hit_rate}%\n\n"
-            "二、本周反馈分布\n"
-            + "\n".join(feedback_lines)
-            + "\n\n原因分布\n"
-            + "\n".join(reason_lines)
-            + "\n\n探索/画像贴合/知识缺口反馈分布\n"
-            + "\n".join(dimension_lines)
-            + "\n\n三、画像置信度分层\n"
-            + "稳定画像\n"
-            + "\n".join(profile_sections["stable"])
-            + "\n\n待验证画像\n"
-            + "\n".join(profile_sections["pending"])
-            + "\n\n新出现信号\n"
-            + "\n".join(profile_sections["new"])
-            + "\n\n可能误解\n"
-            + "\n".join(profile_sections["misunderstood"])
-            + "\n\n四、当前增强的画像维度\n"
-            + "\n".join(enhanced_lines)
-            + "\n\n五、系统可能的误解\n"
-            + "\n".join(misunderstanding_lines)
-            + "\n\n六、最近自由文本补充\n"
-            + "\n".join(free_text_lines)
-            + "\n\n七、下周建议探索方向\n"
-            + "\n".join(next_direction_lines)
-            + "\n\n八、需要你回答的 3 个反思问题\n"
-            + "1. 本周哪一次推荐最贴近你当前真实问题？为什么？\n"
-            + "2. 哪类推荐看起来合理但实际不想读？主要原因是主题、难度、时机还是书本身？\n"
-            + "3. 下周你更希望系统加深一个已有方向，还是探索一个新方向？"
-        )
+        return build_weekly_report_payload(self.repo)["report_text"]
 
     def send_weekly_report(self) -> None:
         run_id = self.repo.create_run("weekly_report", {"channel": self.channel})
@@ -594,8 +516,6 @@ class ReadingCoachWorkflow:
             warning = f"reading pack generation failed: recommendation_id={recommendation_id}: {exc}"
             logger.warning(warning)
             self.repo.record_run_warning(run_id, warning)
-            if self.reading_pack_agent is not None:
-                raise
             return None
 
     def _send_reading_pack_preview(
@@ -934,6 +854,127 @@ def _search_plans_for_themes(themes: list[str], plan: dict[str, Any] | None) -> 
                 }
             )
     return search_plans
+
+
+def build_weekly_report_payload(repo: Repository, days: int = 7) -> dict[str, Any]:
+    days = max(1, min(int(days), 30))
+    recommendation_count = repo.weekly_recommendation_count(days)
+    feedback_type_counts = repo.weekly_feedback_type_counts(days)
+    reason_code_counts = repo.weekly_reason_code_counts(days)
+    dimension_counts = repo.weekly_feedback_dimension_counts(days)
+    positive_theme_counts = repo.weekly_positive_theme_counts(days)
+    misread_signal_counts = repo.weekly_misread_signal_counts(days)
+    recent_profiles = repo.recent_profile_updates(days, limit=8)
+    profile_items = repo.profile_items_for_report(days, limit=40)
+    profile_misunderstanding_signals = repo.weekly_profile_misunderstanding_signals(days)
+    recent_free_texts = repo.recent_feedback_free_texts(days, limit=3)
+    enhanced_dimensions = repo.recent_profile_dimension_counts(days)
+    feedback_processing = repo.weekly_feedback_processing_summary(days)
+    hermes_profile_update_counts = repo.weekly_hermes_profile_update_status_counts(days)
+    reflection_status_counts = repo.weekly_reflection_status_counts(days)
+
+    feedback_total = sum(int(row["count"]) for row in feedback_type_counts)
+    positive_total = sum(
+        int(row["count"])
+        for row in feedback_type_counts
+        if row["feedback_type"] in {"like", "go_deeper", "already_read"}
+    )
+    hit_rate = round((positive_total / feedback_total) * 100, 1) if feedback_total else 0.0
+
+    feedback_lines = [
+        f"- {FEEDBACK_LABELS.get(row['feedback_type'], row['feedback_type'])} ({row['feedback_type']}): {row['count']}"
+        for row in feedback_type_counts
+    ] or ["- 暂无反馈"]
+    reason_lines = [
+        f"- {FEEDBACK_REASON_LABELS.get(row['reason_code'], row['reason_code'])} ({row['reason_code']}): {row['count']}"
+        for row in reason_code_counts
+    ] or ["- 暂无原因反馈"]
+    dimension_lines = [
+        f"- {_dimension_type_label(row['dimension_type'])} / {FEEDBACK_LABELS.get(row['feedback_type'], row['feedback_type'])}: {row['count']}"
+        for row in dimension_counts
+    ] or ["- 暂无可分布的反馈"]
+    profile_sections = _profile_confidence_sections(profile_items, profile_misunderstanding_signals)
+    enhanced_lines = [
+        (
+            f"- {PROFILE_CATEGORIES.get(row['category'], row['category'])}: "
+            f"{row['item_count']} 条画像，证据 {int(row['evidence_count'] or 0)}，平均权重 {round(float(row['avg_weight'] or 0), 2)}"
+        )
+        for row in enhanced_dimensions
+    ] or ["- 暂无明显增强的画像维度。"]
+    misunderstanding_lines = _misunderstanding_lines(misread_signal_counts)
+    free_text_lines = _free_text_summary_lines(recent_free_texts)
+    next_direction_lines = _next_direction_lines(positive_theme_counts, recent_profiles, feedback_total)
+    user_summary_lines = _user_weekly_summary_lines(
+        recommendation_count,
+        feedback_total,
+        positive_total,
+        hit_rate,
+        profile_sections,
+        misunderstanding_lines,
+        next_direction_lines,
+    )
+    writeback_lines = _profile_writeback_lines(
+        feedback_processing,
+        hermes_profile_update_counts,
+        reflection_status_counts,
+    )
+    report_text = (
+        f"{days} 天画像复盘\n\n"
+        "给你的结论\n"
+        + "\n".join(user_summary_lines)
+        + "\n\n画像写回状态\n"
+        + "\n".join(writeback_lines)
+        + "\n\n"
+        "一、本周推荐概况\n"
+        f"- 推荐总数：{recommendation_count}\n"
+        f"- 反馈总数：{feedback_total}\n"
+        f"- 正反馈数量：{positive_total}（like / go_deeper / already_read）\n"
+        f"- 推荐命中率：{hit_rate}%\n\n"
+        "二、本周反馈分布\n"
+        + "\n".join(feedback_lines)
+        + "\n\n原因分布\n"
+        + "\n".join(reason_lines)
+        + "\n\n探索/画像贴合/知识缺口反馈分布\n"
+        + "\n".join(dimension_lines)
+        + "\n\n三、画像置信度分层\n"
+        + "稳定画像\n"
+        + "\n".join(profile_sections["stable"])
+        + "\n\n待验证画像\n"
+        + "\n".join(profile_sections["pending"])
+        + "\n\n新出现信号\n"
+        + "\n".join(profile_sections["new"])
+        + "\n\n可能误解\n"
+        + "\n".join(profile_sections["misunderstood"])
+        + "\n\n四、当前增强的画像维度\n"
+        + "\n".join(enhanced_lines)
+        + "\n\n五、系统可能的误解\n"
+        + "\n".join(misunderstanding_lines)
+        + "\n\n六、最近自由文本补充\n"
+        + "\n".join(free_text_lines)
+        + "\n\n七、下周建议探索方向\n"
+        + "\n".join(next_direction_lines)
+        + "\n\n八、需要你回答的 3 个反思问题\n"
+        + "1. 本周哪一次推荐最贴近你当前真实问题？为什么？\n"
+        + "2. 哪类推荐看起来合理但实际不想读？主要原因是主题、难度、时机还是书本身？\n"
+        + "3. 下周你更希望系统加深一个已有方向，还是探索一个新方向？"
+    )
+    return {
+        "days": days,
+        "metrics": {
+            "recommendation_count": recommendation_count,
+            "feedback_total": feedback_total,
+            "positive_total": positive_total,
+            "hit_rate": hit_rate,
+        },
+        "user_summary": user_summary_lines,
+        "writeback_status": writeback_lines,
+        "profile_sections": profile_sections,
+        "enhanced_dimensions": enhanced_lines,
+        "misunderstandings": misunderstanding_lines,
+        "recent_free_texts": free_text_lines,
+        "next_directions": next_direction_lines,
+        "report_text": report_text,
+    }
 
 
 def _profile_dimensions(raw: Any) -> list[str]:
@@ -1363,6 +1404,101 @@ def _free_text_summary_lines(rows) -> list[str]:
         safe_text = escape(text, quote=False)
         lines.append(f"- {row['theme']} / {feedback_label}{reason}: {safe_text}")
     return lines
+
+
+def _user_weekly_summary_lines(
+    recommendation_count: int,
+    feedback_total: int,
+    positive_total: int,
+    hit_rate: float,
+    profile_sections: dict[str, list[str]],
+    misunderstanding_lines: list[str],
+    next_direction_lines: list[str],
+) -> list[str]:
+    lines = [
+        f"- 这 7 天系统一共给你推了 {recommendation_count} 本书，收到 {feedback_total} 次反馈；其中 {positive_total} 次可以视为正向信号，粗略命中率是 {hit_rate}%。"
+    ]
+    stable = _first_real_line(profile_sections.get("stable", []))
+    pending = _first_real_line(profile_sections.get("pending", []))
+    misunderstood = _first_real_line(profile_sections.get("misunderstood", []))
+    if stable:
+        lines.append(f"- 目前相对稳定的画像是：{_humanize_profile_line(stable)}")
+    elif pending:
+        lines.append(f"- 目前还没有足够稳定的画像，但有一个值得继续验证的方向：{_humanize_profile_line(pending)}")
+    else:
+        lines.append("- 目前画像证据还偏少，更适合把下周当成校准周，而不是急着给你贴长期标签。")
+
+    if misunderstood:
+        lines.append(f"- 有一个画像可能需要修正：{_humanize_profile_line(misunderstood)}")
+    else:
+        signal = _first_real_line(misunderstanding_lines)
+        if signal:
+            lines.append(f"- 系统暂时没有发现强误解，但仍会观察这个信号：{signal.removeprefix('- ').strip()}")
+
+    direction = _first_real_line(next_direction_lines)
+    if direction:
+        lines.append(f"- 下周推荐策略建议：{direction.removeprefix('- ').strip()}")
+    return lines
+
+
+def _profile_writeback_lines(feedback_processing, hermes_profile_update_counts, reflection_status_counts) -> list[str]:
+    total = int(feedback_processing["total_count"] or 0)
+    processed = int(feedback_processing["processed_count"] or 0)
+    pending = int(feedback_processing["pending_count"] or 0)
+    hermes_counts = {row["status"]: int(row["count"]) for row in hermes_profile_update_counts}
+    reflection_counts = {row["status"]: int(row["count"]) for row in reflection_status_counts}
+
+    lines = []
+    if total == 0:
+        lines.append("- 本周没有 feedback 事件，所以没有发生“反馈驱动”的 ARC structured profile 写回。")
+        lines.append("- Hermes 主画像也没有收到 feedback.ingest 写回请求；如果画像变化了，来源更可能是自动 reflection。")
+    else:
+        lines.append(f"- ARC structured profile：本周 {total} 条反馈中，已处理 {processed} 条，待处理 {pending} 条。")
+        if hermes_counts:
+            parts = "，".join(f"{status} {count}" for status, count in sorted(hermes_counts.items()))
+            lines.append(f"- Hermes native USER profile：feedback.ingest 审计结果为 {parts}。")
+        else:
+            lines.append("- Hermes native USER profile：没有查到 feedback.ingest 审计记录，需要确认 run-daily 是否已处理这些反馈。")
+
+    if reflection_counts:
+        parts = "，".join(f"{status} {count}" for status, count in sorted(reflection_counts.items()))
+        lines.append(f"- Reflection memory：本周反思记录状态为 {parts}。applied 表示已写入 memory/USER.md 和 memory/MEMORY.md。")
+    else:
+        lines.append("- Reflection memory：本周没有生成反思记录。")
+    return lines
+
+
+def _first_real_line(lines: list[str]) -> str:
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("- 暂无"):
+            return stripped
+    return ""
+
+
+def _humanize_profile_line(line: str) -> str:
+    text = line.removeprefix("- ").strip()
+    fields = {}
+    for part in text.split("; "):
+        if "=" in part:
+            key, value = part.split("=", 1)
+            fields[key] = value
+    category = fields.get("category", "画像")
+    content = fields.get("content", "")
+    confidence = fields.get("confidence", "")
+    evidence_count = fields.get("evidence_count", "")
+    evidence = fields.get("最近证据", "")
+    summary = f"{category}：{content}" if content else text
+    details = []
+    if confidence:
+        details.append(f"置信度 {confidence}")
+    if evidence_count:
+        details.append(f"{evidence_count} 条证据")
+    if evidence:
+        details.append(f"最近证据是 {evidence}")
+    if details:
+        summary += "（" + "，".join(details) + "）"
+    return summary
 
 
 def _next_direction_lines(positive_theme_counts, recent_profiles, feedback_total: int) -> list[str]:

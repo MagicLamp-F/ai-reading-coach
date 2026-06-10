@@ -80,6 +80,8 @@ class DatabaseMigrationTests(unittest.TestCase):
             pack_defaults = {row["name"]: row["dflt_value"] for row in pack_info}
             source_columns = {row["name"] for row in conn.execute("PRAGMA table_info(book_sources)")}
             link_columns = {row["name"] for row in conn.execute("PRAGMA table_info(reading_pack_sources)")}
+            quote_columns = {row["name"] for row in conn.execute("PRAGMA table_info(reading_quotes)")}
+            quote_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(reading_quotes)")}
             candidate_columns = {row["name"] for row in conn.execute("PRAGMA table_info(recommendation_candidates)")}
             outbox_columns = {row["name"] for row in conn.execute("PRAGMA table_info(delivery_outbox)")}
             conn.close()
@@ -93,6 +95,9 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertEqual(pack_defaults["schema_version"], "'deep_read_pack_v2'")
         self.assertIn("text_excerpt", source_columns)
         self.assertIn("book_source_id", link_columns)
+        self.assertIn("selected_text", quote_columns)
+        self.assertIn("section_title", quote_columns)
+        self.assertIn("idx_reading_quotes_pack_created", quote_indexes)
         self.assertIn("source_coverage_score", candidate_columns)
         self.assertIn("reject_reason", candidate_columns)
         self.assertIn("message_type", outbox_columns)
@@ -113,6 +118,21 @@ class DatabaseMigrationTests(unittest.TestCase):
         self.assertIn("raw_response_json", columns)
         self.assertIn("idx_hermes_profile_update_feedback", indexes)
         self.assertIn("idx_hermes_profile_update_status", indexes)
+
+    def test_init_db_creates_profile_item_review_audit_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "test.db")
+            init_db(conn)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(profile_item_review_events)")}
+            indexes = {row["name"] for row in conn.execute("PRAGMA index_list(profile_item_review_events)")}
+            conn.close()
+
+        self.assertIn("profile_item_id", columns)
+        self.assertIn("action", columns)
+        self.assertIn("previous_weight", columns)
+        self.assertIn("new_confidence", columns)
+        self.assertIn("idx_profile_review_item_created", indexes)
+        self.assertIn("idx_profile_review_action_created", indexes)
 
 
 if __name__ == "__main__":

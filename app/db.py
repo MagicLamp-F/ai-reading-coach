@@ -101,6 +101,19 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(feedback_event_id) REFERENCES feedback_events(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS profile_item_review_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_item_id INTEGER NOT NULL,
+            action TEXT NOT NULL CHECK(action IN ('confirm', 'inaccurate', 'downrank')),
+            note TEXT NOT NULL DEFAULT '',
+            previous_weight REAL NOT NULL DEFAULT 0,
+            previous_confidence REAL NOT NULL DEFAULT 0,
+            new_weight REAL NOT NULL DEFAULT 0,
+            new_confidence REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(profile_item_id) REFERENCES profile_items(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS cost_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id INTEGER,
@@ -184,6 +197,24 @@ def init_db(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(reading_pack_id, book_source_id),
             FOREIGN KEY(reading_pack_id) REFERENCES reading_packs(id) ON DELETE CASCADE,
             FOREIGN KEY(book_source_id) REFERENCES book_sources(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS reading_quotes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reading_pack_id INTEGER NOT NULL,
+            recommendation_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            selected_text TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            module TEXT NOT NULL DEFAULT '',
+            section_title TEXT NOT NULL DEFAULT '',
+            source_surface TEXT NOT NULL DEFAULT 'reading_pack',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(reading_pack_id) REFERENCES reading_packs(id) ON DELETE CASCADE,
+            FOREIGN KEY(recommendation_id) REFERENCES recommendations(id) ON DELETE CASCADE,
+            FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS recommendation_candidates (
@@ -311,6 +342,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_feedback_unprocessed ON feedback_events(processed_at);
         CREATE INDEX IF NOT EXISTS idx_hermes_profile_update_feedback ON hermes_profile_update_events(feedback_event_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_hermes_profile_update_status ON hermes_profile_update_events(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_profile_review_item_created ON profile_item_review_events(profile_item_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_profile_review_action_created ON profile_item_review_events(action, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_recommendations_date ON recommendations(recommendation_date);
         CREATE INDEX IF NOT EXISTS idx_cost_logs_run ON cost_logs(run_id);
         CREATE INDEX IF NOT EXISTS idx_reflections_status_created ON reflections(status, created_at DESC);
@@ -319,6 +352,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_reading_packs_book ON reading_packs(book_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_book_sources_book ON book_sources(book_id, fetched_at DESC);
         CREATE INDEX IF NOT EXISTS idx_reading_pack_sources_source ON reading_pack_sources(book_source_id);
+        CREATE INDEX IF NOT EXISTS idx_reading_quotes_pack_created ON reading_quotes(reading_pack_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_reading_quotes_book_created ON reading_quotes(book_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_recommendation_candidates_run_score ON recommendation_candidates(run_id, final_score DESC);
         CREATE INDEX IF NOT EXISTS idx_recommendation_candidates_status ON recommendation_candidates(status, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_delivery_outbox_pending ON delivery_outbox(status, next_attempt_at, id);

@@ -1206,7 +1206,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(all(Path(path).exists() for path in artifact_paths))
             conn.close()
 
-    def test_daily_run_fails_when_hermes_reading_pack_agent_fails(self):
+    def test_daily_run_continues_when_hermes_reading_pack_agent_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             conn = connect(tmp_path / "test.db")
@@ -1231,17 +1231,18 @@ class WorkflowTests(unittest.TestCase):
                 reading_pack_agent=ExplodingReadingPackAgent(),
             )
 
-            with self.assertRaises(RuntimeError):
-                workflow.run_daily_recommendations()
+            run_id = workflow.run_daily_recommendations()
 
-            run = conn.execute("SELECT * FROM run_logs ORDER BY id DESC LIMIT 1").fetchone()
+            run = conn.execute("SELECT * FROM run_logs WHERE id = ?", (run_id,)).fetchone()
             recommendation = conn.execute("SELECT * FROM recommendations WHERE run_id = ?", (run["id"],)).fetchone()
             pack_count = conn.execute("SELECT COUNT(*) AS count FROM reading_packs").fetchone()["count"]
-            self.assertEqual(run["status"], "failed")
-            self.assertIn("reading pack unavailable", run["error_message"])
+            self.assertEqual(run["status"], "success")
+            self.assertIsNone(run["error_message"])
+            self.assertIn("reading pack unavailable", run["warning_message"])
             self.assertIsNotNone(recommendation)
-            self.assertIsNone(recommendation["message_id"])
-            self.assertEqual(len(lark.reading_pack_previews), 0)
+            self.assertEqual(recommendation["message_id"], "rec-1")
+            self.assertEqual(len(lark.reading_pack_previews), 1)
+            self.assertIsNone(lark.reading_pack_previews[0])
             self.assertEqual(len(lark.sent_reading_pack_previews), 0)
             self.assertEqual(pack_count, 0)
             conn.close()

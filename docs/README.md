@@ -21,6 +21,7 @@ SQLite 事实账本
 - Hermes 主画像：Hermes 原生 `USER.md` 中的 `[arc-reading-profile]` 是主画像读源；ARC 本地 `memory/HERMES_NATIVE_PROFILE.md` 仅作为兼容/诊断快照。
 - 推荐历史上下文：ARC 从 SQLite 推荐和反馈历史生成 `RecommendationHistoryContext`，交给 Hermes 做语义选书和避让。
 - 反馈画像 ingest：未处理反馈会进入 Hermes `reading.feedback.ingest`，Hermes 判断是否更新主画像；ARC 写 `hermes_profile_update_events` 审计。
+- 画像证据链：`/admin/profile-evidence` 展示 ARC 本地画像条目、证据和人工纠偏历史，可对不贴切条目执行确认、不准确或降权。
 - 深度读书包：为推荐书生成结构化 deep read pack，并保存到 `reading_packs`、`artifacts` 和 `library/`。
 - 来源增强：可通过 Tavily 和公开页面采集书源摘录，给推荐和读书包提供来源上下文。
 - 飞书反馈：推荐卡片提供喜欢、一般、不感兴趣、已读、想深入等反馈入口。
@@ -106,16 +107,16 @@ python3 -m app.cli run-daily
 
 ### 4. 启动反馈/阅读服务
 
-传统 HTML 服务：
+传统 HTML 反馈服务（只保留旧飞书反馈入口，避免和 FastAPI 抢端口）：
 
 ```bash
-python3 -m app.cli run-server --host 0.0.0.0 --port 8000
+python3 -m app.cli run-server --host 127.0.0.1 --port 8002
 ```
 
 JSON API 服务：
 
 ```bash
-python3 -m app.cli run-api --host 0.0.0.0 --port 8000
+python3 -m app.cli run-api --host 127.0.0.1 --port 8000
 ```
 
 React Web 前端：
@@ -157,15 +158,35 @@ Compose 默认启动 API 与 Vite Web 开发服务。生产部署可使用 `depl
 | React Web 前端 | `http://localhost:8010/` | 移动端门面、阅读包、分日导读和管理入口 |
 | Web 代理 API | `http://localhost:8010/api/healthz` | 通过 Vite/nginx 访问后端 |
 | 后端 API | `http://localhost:8000/api/healthz` | FastAPI JSON API |
-| 传统 HTML 服务 | `http://localhost:8000/healthz` | `run-server` 反馈/阅读页 |
+| 传统 HTML 服务 | `http://localhost:8002/healthz` | `run-server` 旧反馈入口 |
+
+常用管理页：
+
+```text
+http://localhost:8010/admin/weekly-report
+http://localhost:8010/admin/profile-evidence
+```
+
+管理入口默认账号密码：
+
+```text
+admin / 123456
+```
+
+可用 `.env` 覆盖：
+
+```env
+ARC_ADMIN_USERNAME=admin
+ARC_ADMIN_PASSWORD=123456
+```
 
 ## 常用命令
 
 ```bash
 python3 -m app.cli init-db
 python3 -m app.cli run-daily
-python3 -m app.cli run-server --host 0.0.0.0 --port 8000
-python3 -m app.cli run-api --host 0.0.0.0 --port 8000
+python3 -m app.cli run-server --host 127.0.0.1 --port 8002
+python3 -m app.cli run-api --host 127.0.0.1 --port 8000
 python3 -m app.cli show-hermes-profile-sync --json
 python3 -m app.cli generate-reading-pack --recommendation-id <id>
 python3 -m app.cli run-weekly-report

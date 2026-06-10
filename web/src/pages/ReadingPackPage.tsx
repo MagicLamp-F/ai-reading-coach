@@ -1,8 +1,8 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { Check, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { BookMarked, Check, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react';
 import { FormEvent, useMemo, useState } from 'react';
 import { apiGet, apiPost, searchParams } from '../shared/api/client';
-import { ReadingPack } from '../shared/api/types';
+import { ReadingPack, ReadingQuotesResponse } from '../shared/api/types';
 import { Shell } from '../shared/ui/Shell';
 import { ErrorState, LoadingState, MissingParams } from '../shared/ui/State';
 
@@ -96,6 +96,7 @@ function ReadingPackView({ pack }: { pack: ReadingPack }) {
           </nav>
         </article>
         <aside className="side-rail">
+          <QuotePanel pack={pack} currentModule={current.slug} />
           <FeedbackPanel pack={pack} />
         </aside>
       </section>
@@ -133,6 +134,66 @@ function ObjectBlock({ value }: { value: Record<string, unknown> }) {
         </div>
       ))}
     </div>
+  );
+}
+
+function QuotePanel({ pack, currentModule }: { pack: ReadingPack; currentModule: string }) {
+  const [selectedText, setSelectedText] = useState('');
+  const [note, setNote] = useState('');
+  const [sectionTitle, setSectionTitle] = useState('');
+  const queryClient = useQueryClient();
+  const quotes = useQuery({
+    queryKey: ['reading-pack-quotes', pack.id, pack.token],
+    queryFn: () => apiGet<ReadingQuotesResponse>(`/api/reading-packs/${pack.id}/quotes?token=${encodeURIComponent(pack.token)}`),
+  });
+  const mutation = useMutation({
+    mutationFn: () =>
+      apiPost<{ status: string }>(`/api/reading-packs/${pack.id}/quotes`, {
+        token: pack.token,
+        selected_text: selectedText,
+        note,
+        module: currentModule,
+        section_title: sectionTitle,
+      }),
+    onSuccess: () => {
+      setSelectedText('');
+      setNote('');
+      setSectionTitle('');
+      queryClient.invalidateQueries({ queryKey: ['reading-pack-quotes', pack.id, pack.token] });
+    },
+  });
+
+  function fillSelection() {
+    const selection = window.getSelection?.()?.toString().trim() || '';
+    if (selection) setSelectedText(selection.slice(0, 800));
+  }
+
+  return (
+    <section className="feedback-card quote-card">
+      <h2>
+        <BookMarked size={17} />
+        摘抄
+      </h2>
+      <p className="muted small-line">选中正文中的一句，保存到这本书的回味清单。</p>
+      <button type="button" className="secondary-button" onClick={fillSelection}>
+        填入选中文本
+      </button>
+      <textarea maxLength={800} value={selectedText} onChange={(event) => setSelectedText(event.target.value)} placeholder="想留下的句子" />
+      <input maxLength={160} value={sectionTitle} onChange={(event) => setSectionTitle(event.target.value)} placeholder="可选：来自哪一节" />
+      <input maxLength={500} value={note} onChange={(event) => setNote(event.target.value)} placeholder="可选：为什么喜欢" />
+      <button type="button" className="primary-button" disabled={mutation.isPending || !selectedText.trim()} onClick={() => mutation.mutate()}>
+        保存摘抄
+      </button>
+      {mutation.isError ? <p className="error-text">{(mutation.error as Error).message}</p> : null}
+      <div className="quote-list">
+        {(quotes.data?.items || []).slice(0, 6).map((quote) => (
+          <article className="quote-chip" key={quote.id}>
+            <blockquote>{quote.selected_text}</blockquote>
+            {quote.note ? <small>{quote.note}</small> : null}
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 

@@ -5,13 +5,14 @@ export const ApiErrorSchema = z.object({
 });
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+  const response = await fetch(path, { credentials: 'include' });
   return readJson<T>(response);
 }
 
 export async function apiPost<T>(path: string, payload: unknown): Promise<T> {
   const response = await fetch(path, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
@@ -21,6 +22,7 @@ export async function apiPost<T>(path: string, payload: unknown): Promise<T> {
 export async function apiDelete<T>(path: string, payload: unknown): Promise<T> {
   const response = await fetch(path, {
     method: 'DELETE',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
@@ -30,6 +32,7 @@ export async function apiDelete<T>(path: string, payload: unknown): Promise<T> {
 export async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
   const response = await fetch(path, {
     method: 'POST',
+    credentials: 'include',
     body: formData,
   });
   return readJson<T>(response);

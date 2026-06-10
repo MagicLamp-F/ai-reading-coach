@@ -8,7 +8,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/projects/ai-reading-coach
 EnvironmentFile=/home/ubuntu/projects/ai-reading-coach/.env
-ExecStart=/usr/bin/python3 -m app.cli run-server --host 0.0.0.0 --port 8000
+ExecStart=/usr/bin/python3 -m app.cli run-server --host 0.0.0.0 --port 8010
 Restart=on-failure
 RestartSec=5
 

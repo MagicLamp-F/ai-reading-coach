@@ -117,7 +117,7 @@ class FeedbackServerTests(unittest.TestCase):
         self.assertIn("页内目录", body)
         self.assertIn("overflow-x:hidden", body)
         self.assertIn("text-overflow:ellipsis", body)
-        self.assertIn(".feedbacks{position:static", body)
+        self.assertIn(".feedbacks{width:100%", body)
         self.assertIn("class=\"text-paragraph\"", body)
         self.assertIn("约 1 分钟", body)
         self.assertIn("scrollBar", body)
@@ -126,6 +126,9 @@ class FeedbackServerTests(unittest.TestCase):
         self.assertIn("喜欢", body)
         self.assertIn("/feedback/inline", body)
         self.assertIn("reason_choice", body)
+        self.assertIn("我的摘抄", body)
+        self.assertIn("/reading-pack/quote", body)
+        self.assertIn("fillQuote", body)
 
     def test_reading_pack_page_can_open_specific_module(self):
         reading_pack_id = self._add_reading_pack()
@@ -156,6 +159,26 @@ class FeedbackServerTests(unittest.TestCase):
         self.assertEqual(row["free_text"], "正好需要")
         self.assertIn("反馈已记录", body)
         self.assertIn("回到快读包", body)
+
+    def test_reading_pack_quote_records_quote_and_profile_signal(self):
+        reading_pack_id = self._add_reading_pack()
+        page_url = build_reading_pack_url(self.settings.public_base_url, reading_pack_id, self.settings.feedback_secret)
+        body = self._post_reading_quote(page_url, "这是一句想反复回味的原著句子", "语言很有画面感")
+
+        self.assertIn("我的摘抄", body)
+        self.assertIn("这是一句想反复回味的原著句子", body)
+        conn = connect(self.db_path)
+        try:
+            quote = conn.execute("SELECT * FROM reading_quotes ORDER BY id DESC LIMIT 1").fetchone()
+            profile = conn.execute(
+                "SELECT * FROM profile_items WHERE evidence_json LIKE ? ORDER BY id DESC LIMIT 1",
+                (f'%\"quote_id\": {int(quote["id"])}%',),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(quote["selected_text"], "这是一句想反复回味的原著句子")
+        self.assertEqual(quote["note"], "语言很有画面感")
+        self.assertIsNotNone(profile)
 
     def test_reading_pack_page_rejects_bad_signature(self):
         reading_pack_id = self._add_reading_pack()
@@ -411,6 +434,29 @@ class FeedbackServerTests(unittest.TestCase):
         ).encode("utf-8")
         req = Request(
             f"{self.settings.public_base_url}/feedback/inline",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urlopen(req, timeout=5) as response:
+            return response.read().decode("utf-8")
+
+    def _post_reading_quote(self, page_url: str, selected_text: str, note: str) -> str:
+        from urllib.parse import parse_qs, urlparse
+
+        query = parse_qs(urlparse(page_url).query)
+        payload = urlencode(
+            {
+                "reading_pack_id": query["id"][0],
+                "token": query["token"][0],
+                "module": "overview",
+                "section_title": "一句话主张",
+                "selected_text": selected_text,
+                "note": note,
+            }
+        ).encode("utf-8")
+        req = Request(
+            f"{self.settings.public_base_url}/reading-pack/quote",
             data=payload,
             method="POST",
             headers={"Content-Type": "application/x-www-form-urlencoded"},

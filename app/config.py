@@ -58,6 +58,8 @@ class Settings:
     source_aware_candidate_count: int
     source_min_coverage_score: float
     source_aware_allow_limited_fill: bool
+    admin_username: str
+    admin_password: str
     log_level: str
 
     @classmethod
@@ -110,9 +112,9 @@ class Settings:
             reading_pack_provider=os.getenv("READING_PACK_PROVIDER", "hermes-agent").strip().lower(),
             reading_pack_library_dir=Path(os.getenv("READING_PACK_LIBRARY_DIR", "library")),
             source_search_enabled=_env_bool("SOURCE_SEARCH_ENABLED", True),
-            source_search_max_results=int(os.getenv("SOURCE_SEARCH_MAX_RESULTS", "3")),
+            source_search_max_results=int(os.getenv("SOURCE_SEARCH_MAX_RESULTS", "5")),
             source_search_depth=os.getenv("SOURCE_SEARCH_DEPTH", "advanced").strip().lower(),
-            source_search_queries_per_book=int(os.getenv("SOURCE_SEARCH_QUERIES_PER_BOOK", "3")),
+            source_search_queries_per_book=int(os.getenv("SOURCE_SEARCH_QUERIES_PER_BOOK", "6")),
             source_search_include_raw_content=_env_bool("SOURCE_SEARCH_INCLUDE_RAW_CONTENT", True),
             source_fetch_timeout_seconds=float(os.getenv("SOURCE_FETCH_TIMEOUT_SECONDS", "6")),
             source_fetch_retries=int(os.getenv("SOURCE_FETCH_RETRIES", "0")),
@@ -121,6 +123,8 @@ class Settings:
             source_aware_candidate_count=int(os.getenv("SOURCE_AWARE_CANDIDATE_COUNT", "6")),
             source_min_coverage_score=float(os.getenv("SOURCE_MIN_COVERAGE_SCORE", "0.5")),
             source_aware_allow_limited_fill=_env_bool("SOURCE_AWARE_ALLOW_LIMITED_FILL", False),
+            admin_username=os.getenv("ARC_ADMIN_USERNAME", "admin"),
+            admin_password=os.getenv("ARC_ADMIN_PASSWORD", "123456"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
 

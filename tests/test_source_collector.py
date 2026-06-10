@@ -87,6 +87,22 @@ class SourceCollectorTests(unittest.TestCase):
             self.assertEqual(stored[0]["source_type"], "review")
             self.assertIn("Book Review", stored[0]["title"])
 
+    def test_collect_for_recommendation_uses_expanded_source_queries_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _repo_with_recommendation(Path(tmp), "")
+            recommendation = repo.get_recommendation_detail(1)
+            http = FakeHttp("<html><title>unused</title></html>")
+            search = FakeSearch([])
+            collector = BookSourceCollector(repo, http, search=search)
+
+            collector.collect_for_recommendation(recommendation)
+            queries = [query for query, _max_results, _depth, _raw in search.queries]
+
+            self.assertEqual(len(queries), 6)
+            self.assertTrue(any("publisher official book page" in query for query in queries))
+            self.assertTrue(any("course syllabus reading guide" in query for query in queries))
+            self.assertTrue(all(max_results == 5 for _query, max_results, _depth, _raw in search.queries))
+
     def test_collect_for_recommendation_uses_tavily_raw_content_before_fetching_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _repo_with_recommendation(Path(tmp), "")

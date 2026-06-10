@@ -40,6 +40,19 @@ class ReadingPackDraft:
 
 
 @dataclass(frozen=True)
+class ReadingQuoteDraft:
+    reading_pack_id: int
+    recommendation_id: int
+    book_id: int
+    selected_text: str
+    note: str
+    module: str
+    section_title: str
+    source_surface: str = "reading_pack"
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class BookSourceDraft:
     book_id: int
     source_type: str
@@ -75,6 +88,13 @@ class DeliveryOutboxDraft:
     metadata: dict[str, Any]
     last_error: str = ""
     next_attempt_seconds: int = 0
+
+
+@dataclass(frozen=True)
+class ProfileItemReviewDraft:
+    profile_item_id: int
+    action: str
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -829,6 +849,154 @@ class Repository:
             )
         )
 
+    def profile_items_with_review_summary(self, limit: int = 80) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT
+                    p.*,
+                    COALESCE(review_counts.review_count, 0) AS review_count,
+                    COALESCE(review_counts.confirm_count, 0) AS confirm_count,
+                    COALESCE(review_counts.inaccurate_count, 0) AS inaccurate_count,
+                    COALESCE(review_counts.downrank_count, 0) AS downrank_count,
+                    latest.action AS latest_review_action,
+                    latest.note AS latest_review_note,
+                    latest.created_at AS latest_review_at
+                FROM profile_items p
+                LEFT JOIN (
+                    SELECT
+                        profile_item_id,
+                        COUNT(*) AS review_count,
+                        SUM(CASE WHEN action = 'confirm' THEN 1 ELSE 0 END) AS confirm_count,
+                        SUM(CASE WHEN action = 'inaccurate' THEN 1 ELSE 0 END) AS inaccurate_count,
+                        SUM(CASE WHEN action = 'downrank' THEN 1 ELSE 0 END) AS downrank_count
+                    FROM profile_item_review_events
+                    GROUP BY profile_item_id
+                ) review_counts ON review_counts.profile_item_id = p.id
+                LEFT JOIN profile_item_review_events latest ON latest.id = (
+                    SELECT e.id
+                    FROM profile_item_review_events e
+                    WHERE e.profile_item_id = p.id
+                    ORDER BY e.created_at DESC, e.id DESC
+                    LIMIT 1
+                )
+                ORDER BY p.weight DESC, p.confidence DESC, p.evidence_count DESC, p.updated_at DESC, p.category ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+
+    def profile_item_with_review_summary(self, profile_item_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT
+                p.*,
+                COALESCE(review_counts.review_count, 0) AS review_count,
+                COALESCE(review_counts.confirm_count, 0) AS confirm_count,
+                COALESCE(review_counts.inaccurate_count, 0) AS inaccurate_count,
+                COALESCE(review_counts.downrank_count, 0) AS downrank_count,
+                latest.action AS latest_review_action,
+                latest.note AS latest_review_note,
+                latest.created_at AS latest_review_at
+            FROM profile_items p
+            LEFT JOIN (
+                SELECT
+                    profile_item_id,
+                    COUNT(*) AS review_count,
+                    SUM(CASE WHEN action = 'confirm' THEN 1 ELSE 0 END) AS confirm_count,
+                    SUM(CASE WHEN action = 'inaccurate' THEN 1 ELSE 0 END) AS inaccurate_count,
+                    SUM(CASE WHEN action = 'downrank' THEN 1 ELSE 0 END) AS downrank_count
+                FROM profile_item_review_events
+                WHERE profile_item_id = ?
+                GROUP BY profile_item_id
+            ) review_counts ON review_counts.profile_item_id = p.id
+            LEFT JOIN profile_item_review_events latest ON latest.id = (
+                SELECT e.id
+                FROM profile_item_review_events e
+                WHERE e.profile_item_id = p.id
+                ORDER BY e.created_at DESC, e.id DESC
+                LIMIT 1
+            )
+            WHERE p.id = ?
+            """,
+            (profile_item_id, profile_item_id),
+        ).fetchone()
+
+    def profile_item_review_events(self, profile_item_id: int, limit: int = 10) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT *
+                FROM profile_item_review_events
+                WHERE profile_item_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (profile_item_id, limit),
+            )
+        )
+
+    def review_profile_item(self, draft: ProfileItemReviewDraft) -> tuple[sqlite3.Row, sqlite3.Row]:
+        action = draft.action.strip()
+        if action not in {"confirm", "inaccurate", "downrank"}:
+            raise ValueError("Unsupported profile review action")
+        note = draft.note.strip()[:500]
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT * FROM profile_items WHERE id = ?",
+                (draft.profile_item_id,),
+            ).fetchone()
+            if row is None:
+                raise LookupError("Profile item not found")
+            previous_weight = float(row["weight"])
+            previous_confidence = float(row["confidence"])
+            if action == "confirm":
+                new_weight = _clamp(previous_weight + 0.03)
+                new_confidence = _clamp(previous_confidence + 0.08)
+            elif action == "inaccurate":
+                new_weight = _clamp(previous_weight - 0.25)
+                new_confidence = _clamp(previous_confidence - 0.25)
+            else:
+                new_weight = _clamp(previous_weight - 0.15)
+                new_confidence = _clamp(previous_confidence - 0.12)
+            cur = self.conn.execute(
+                """
+                INSERT INTO profile_item_review_events(
+                    profile_item_id, action, note, previous_weight, previous_confidence,
+                    new_weight, new_confidence
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    draft.profile_item_id,
+                    action,
+                    note,
+                    previous_weight,
+                    previous_confidence,
+                    new_weight,
+                    new_confidence,
+                ),
+            )
+            self.conn.execute(
+                """
+                UPDATE profile_items
+                SET weight = ?, confidence = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (new_weight, new_confidence, draft.profile_item_id),
+            )
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+        updated = self.conn.execute("SELECT * FROM profile_items WHERE id = ?", (draft.profile_item_id,)).fetchone()
+        event = self.conn.execute("SELECT * FROM profile_item_review_events WHERE id = ?", (int(cur.lastrowid),)).fetchone()
+        if updated is None or event is None:
+            raise RuntimeError("Profile review write verification failed")
+        return updated, event
+
     def recent_recommendations(self, days: int = 14) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(
@@ -1059,6 +1227,74 @@ class Repository:
                 ORDER BY rps.created_at ASC, bs.id ASC
                 """,
                 (reading_pack_id,),
+            )
+        )
+
+    def add_reading_quote(self, draft: ReadingQuoteDraft) -> int:
+        selected_text = " ".join(draft.selected_text.split())[:2000]
+        note = draft.note.strip()[:500]
+        if not selected_text:
+            raise ValueError("Reading quote text is required")
+        cur = self.conn.execute(
+            """
+            INSERT INTO reading_quotes(
+                reading_pack_id,
+                recommendation_id,
+                book_id,
+                selected_text,
+                note,
+                module,
+                section_title,
+                source_surface,
+                metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.reading_pack_id,
+                draft.recommendation_id,
+                draft.book_id,
+                selected_text,
+                note,
+                draft.module.strip()[:80],
+                draft.section_title.strip()[:160],
+                draft.source_surface.strip()[:80] or "reading_pack",
+                json.dumps(draft.metadata or {}, ensure_ascii=False),
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def reading_quotes_for_pack(self, reading_pack_id: int, limit: int = 50) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT rq.*, b.title AS book_title, b.author AS book_author
+                FROM reading_quotes rq
+                JOIN books b ON b.id = rq.book_id
+                WHERE rq.reading_pack_id = ?
+                ORDER BY rq.created_at DESC, rq.id DESC
+                LIMIT ?
+                """,
+                (reading_pack_id, limit),
+            )
+        )
+
+    def recent_reading_quotes(self, limit: int = 80) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT
+                    rq.*,
+                    b.title AS book_title,
+                    b.author AS book_author,
+                    rp.title AS reading_pack_title
+                FROM reading_quotes rq
+                JOIN books b ON b.id = rq.book_id
+                JOIN reading_packs rp ON rp.id = rq.reading_pack_id
+                ORDER BY rq.created_at DESC, rq.id DESC
+                LIMIT ?
+                """,
+                (limit,),
             )
         )
 
@@ -1387,6 +1623,50 @@ class Repository:
                 GROUP BY category
                 ORDER BY evidence_count DESC, item_count DESC, category ASC
                 LIMIT 8
+                """,
+                (f"-{days} days",),
+            )
+        )
+
+    def weekly_feedback_processing_summary(self, days: int = 7) -> sqlite3.Row:
+        row = self.conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total_count,
+                SUM(CASE WHEN processed_at IS NOT NULL THEN 1 ELSE 0 END) AS processed_count,
+                SUM(CASE WHEN processed_at IS NULL THEN 1 ELSE 0 END) AS pending_count
+            FROM feedback_events
+            WHERE created_at >= datetime('now', ?)
+            """,
+            (f"-{days} days",),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Feedback processing summary query returned no row")
+        return row
+
+    def weekly_hermes_profile_update_status_counts(self, days: int = 7) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM hermes_profile_update_events
+                WHERE created_at >= datetime('now', ?)
+                GROUP BY status
+                ORDER BY status ASC
+                """,
+                (f"-{days} days",),
+            )
+        )
+
+    def weekly_reflection_status_counts(self, days: int = 7) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM reflections
+                WHERE created_at >= datetime('now', ?)
+                GROUP BY status
+                ORDER BY status ASC
                 """,
                 (f"-{days} days",),
             )

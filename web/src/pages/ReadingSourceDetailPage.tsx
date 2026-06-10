@@ -3,7 +3,8 @@ import { Trash2 } from 'lucide-react';
 import { FormEvent, useState } from 'react';
 import { apiDelete, apiGet, apiPost, searchParams } from '../shared/api/client';
 import { ReadingSource } from '../shared/api/types';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { AdminLogin, isAuthError } from '../shared/ui/AdminAuth';
 import { Shell } from '../shared/ui/Shell';
 import { ErrorState, LoadingState, MissingParams } from '../shared/ui/State';
 
@@ -11,27 +12,32 @@ export function ReadingSourceDetailPage() {
   const params = searchParams();
   const id = params.get('id');
   const adminToken = params.get('admin_token');
-  if (!id || !adminToken) return <MissingParams message="书源详情需要 id 和 admin_token。" />;
+  const queryClient = useQueryClient();
+  if (!id) return <MissingParams message="书源详情需要 id。" />;
+  const authSuffix = adminToken ? `?admin_token=${encodeURIComponent(adminToken)}` : '';
   const query = useQuery({
-    queryKey: ['reading-source', id, adminToken],
-    queryFn: () => apiGet<ReadingSource>(`/api/admin/reading-sources/${id}?admin_token=${encodeURIComponent(adminToken)}`),
+    queryKey: ['reading-source', id, adminToken ?? 'session'],
+    queryFn: () => apiGet<ReadingSource>(`/api/admin/reading-sources/${id}${authSuffix}`),
   });
   if (query.isLoading) return <LoadingState />;
+  if (query.isError && !adminToken && isAuthError(query.error)) {
+    return <AdminLogin onLoggedIn={() => queryClient.invalidateQueries({ queryKey: ['reading-source', id, 'session'] })} />;
+  }
   if (query.isError) return <ErrorState message={(query.error as Error).message} />;
   if (!query.data) return <ErrorState message="书源数据为空。" />;
   return <SourceDetail source={query.data} adminToken={adminToken} />;
 }
 
-function SourceDetail({ source, adminToken }: { source: ReadingSource; adminToken: string }) {
+function SourceDetail({ source, adminToken }: { source: ReadingSource; adminToken: string | null }) {
   const [result, setResult] = useState('');
   const createMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => apiPost<{ first_day_url: string }>('/api/admin/reading-plans', payload),
     onSuccess: (data) => setResult(data.first_day_url),
   });
   const deleteMutation = useMutation({
-    mutationFn: () => apiDelete<{ status: string }>(`/api/admin/reading-sources/${source.id}`, { admin_token: adminToken }),
+    mutationFn: () => apiDelete<{ status: string }>(`/api/admin/reading-sources/${source.id}`, adminToken ? { admin_token: adminToken } : {}),
     onSuccess: () => {
-      window.location.href = `/guided-reading/sources?admin_token=${encodeURIComponent(adminToken)}`;
+      window.location.href = adminToken ? `/guided-reading/sources?admin_token=${encodeURIComponent(adminToken)}` : '/guided-reading/sources';
     },
   });
 
@@ -39,7 +45,7 @@ function SourceDetail({ source, adminToken }: { source: ReadingSource; adminToke
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     createMutation.mutate({
-      admin_token: adminToken,
+      ...(adminToken ? { admin_token: adminToken } : {}),
       source_file_id: source.id,
       plan_days: Number(form.get('plan_days') || 5),
       daily_minutes: Number(form.get('daily_minutes') || 8),
@@ -50,8 +56,10 @@ function SourceDetail({ source, adminToken }: { source: ReadingSource; adminToke
     });
   }
 
+  const sourcesHref = adminToken ? `/guided-reading/sources?admin_token=${encodeURIComponent(adminToken)}` : '/guided-reading/sources';
+
   return (
-    <Shell eyebrow="书源" title={source.title} meta={`${source.original_filename} · ${source.file_format} · ${source.char_count} 字`} actions={<a className="secondary-link" href={`/guided-reading/sources?admin_token=${encodeURIComponent(adminToken)}`}>返回书源管理</a>}>
+    <Shell eyebrow="书源" title={source.title} meta={`${source.original_filename} · ${source.file_format} · ${source.char_count} 字`} actions={<a className="secondary-link" href={sourcesHref}>返回书源管理</a>}>
       <section className="admin-grid">
         <section className="content-section source-preview">
           <h2>内容预览</h2>
